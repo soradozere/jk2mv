@@ -1,5 +1,8 @@
 #include <SDL.h>
 #include <SDL_syswm.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten/html5.h>
+#endif
 #include "../qcommon/qcommon.h"
 #include "../sys/sys_local.h"
 #include "../renderer/tr_public.h"
@@ -640,6 +643,28 @@ static rserr_t GLimp_SetMode(glconfig_t *glConfig, const windowDesc_t *windowDes
 
 	if (mode == -2)
 	{
+#ifdef __EMSCRIPTEN__
+		// "Desktop resolution" means the monitor, but what we actually draw into
+		// is the canvas -- and the two rarely match, since the canvas is sized by
+		// the page. Rendering at monitor size into a differently-shaped canvas
+		// just gets letterboxed down by CSS, so track the canvas instead.
+		{
+			double cssW = 0.0, cssH = 0.0;
+			EMSCRIPTEN_RESULT res = emscripten_get_element_css_size( "#canvas", &cssW, &cssH );
+			Com_DPrintf( "canvas css size: %gx%g (result %d)\n", cssW, cssH, (int)res );
+			if ( res == EMSCRIPTEN_RESULT_SUCCESS && cssW >= 1.0 && cssH >= 1.0 )
+			{
+				winWidth = (int)cssW;
+				winHeight = (int)cssH;
+			}
+			else
+			{
+				winWidth = 640;
+				winHeight = 480;
+				Com_Printf( "Cannot determine canvas size, assuming 640x480\n" );
+			}
+		}
+#else
 		// use desktop video resolution
 		if( desktopMode.h > 0 )
 		{
@@ -652,6 +677,7 @@ static rserr_t GLimp_SetMode(glconfig_t *glConfig, const windowDesc_t *windowDes
 			winHeight = 480;
 			Com_Printf( "Cannot determine display resolution, assuming 640x480\n" );
 		}
+#endif
 
 		//glConfig.windowAspect = (float)glConfig.vidWidth / (float)glConfig.vidHeight;
 	}
@@ -1021,7 +1047,15 @@ window_t WIN_Init( const windowDesc_t *windowDesc, glconfig_t *glConfig )
 	r_sdlDriver			= Cvar_Get( "r_sdlDriver",			"",			CVAR_ROM );
 
 	// Window cvars
+#ifdef __EMSCRIPTEN__
+	// A canvas isn't a display. Asking SDL for a fullscreen window makes its
+	// Emscripten backend size the canvas to the monitor and ignore the size we
+	// requested, so the renderer ends up drawing at 1920x1080 into an element
+	// the page has laid out at some other size entirely.
+	r_fullscreen		= Cvar_Get( "r_fullscreen",			"0",		CVAR_ARCHIVE | CVAR_GLOBAL );
+#else
 	r_fullscreen		= Cvar_Get( "r_fullscreen",			"1",		CVAR_ARCHIVE | CVAR_GLOBAL );
+#endif
 	r_noborder			= Cvar_Get( "r_noborder",			"0",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH );
 	r_centerWindow		= Cvar_Get( "r_centerWindow",		"0",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH );
 	r_customwidth		= Cvar_Get( "r_customwidth",		"1600",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH );
@@ -1031,7 +1065,15 @@ window_t WIN_Init( const windowDesc_t *windowDesc, glconfig_t *glConfig )
 	r_mode				= Cvar_Get( "r_mode",				"-2",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH );
 	r_displayRefresh	= Cvar_Get( "r_displayRefresh",		"0",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH );
 	r_savedWindows		= Cvar_Get( "r_savedWindows",		" ",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_ROM );
+#ifdef __EMSCRIPTEN__
+	// Off by default in the browser: the canvas is already sized in CSS pixels,
+	// so allowing high-dpi just makes the backing store devicePixelRatio times
+	// larger (4x the fragments at dpr 2) for an image CSS scales straight back
+	// down again.
+	r_highdpi			= Cvar_Get( "r_highdpi",			"0",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH );
+#else
 	r_highdpi			= Cvar_Get( "r_highdpi",			"1",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH );
+#endif
 
 	// Window render surface cvars
 	r_stencilbits		= Cvar_Get( "r_stencilbits",		"8",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH );

@@ -136,6 +136,7 @@ cvar_t		*s_show;
 cvar_t		*s_mixahead;
 cvar_t		*s_mixPreStep;
 cvar_t		*s_musicVolume;
+cvar_t		*s_musicDisabled;
 cvar_t		*s_musicMult;
 cvar_t		*s_separation;
 cvar_t		*s_doppler;
@@ -291,6 +292,10 @@ void S_Init( void )
 
 	s_volume = Cvar_Get("s_volume", "0.8", CVAR_ARCHIVE | CVAR_GLOBAL);
 	s_musicVolume = Cvar_Get("s_musicvolume", "0.5", CVAR_ARCHIVE | CVAR_GLOBAL);
+
+	// The game's soundtrack is licensed music, so it's never played back here.
+	// Deliberately not archived, so a stale config can't quietly re-enable it.
+	s_musicDisabled = Cvar_Get("s_musicDisabled", "1", 0);
 
 	//rww - multiply s_musicVolume by this value. Set in cgame when necessary.
 	s_musicMult = Cvar_Get ("s_musicMult", "1", 0);
@@ -3163,6 +3168,15 @@ static void S_StartBackgroundTrack_Actual( MusicInfo_t *pMusicInfo, const char *
 	char	dump[16];
 	char	name[MAX_QPATH];
 
+	// The retail soundtrack is licensed music we can't republish, so playback is
+	// disabled outright. Guarded here as well as in S_StartBackgroundTrack()
+	// because the loop-transition path in S_UpdateBackgroundTrack_Actual() also
+	// reaches this function directly -- this is where a track actually gets
+	// opened and played, so nothing can start music without passing through it.
+	if ( s_musicDisabled && s_musicDisabled->integer ) {
+		return;
+	}
+
 	Q_strncpyz( sMusic_BackgroundLoop, loop, sizeof( sMusic_BackgroundLoop ));
 
 	Q_strncpyz( name, intro, sizeof( name ) - 4 );	// this seems to be so that if the filename hasn't got an extension
@@ -3346,6 +3360,14 @@ void S_RestartMusic( void )
 //
 void S_StartBackgroundTrack( const char *intro, const char *loop, qboolean bReturnWithoutStarting )
 {
+	// Licensed soundtrack -- never play it. Returning here (rather than only in
+	// _Actual) also avoids the "Unable to find music file" error spam that the
+	// lookup below would otherwise produce for every requested track.
+	if ( s_musicDisabled && s_musicDisabled->integer ) {
+		Com_DPrintf( "music disabled, not starting track: %s\n", intro ? intro : "" );
+		return;
+	}
+
 	if ( !intro ) {
 		intro = "";
 	}

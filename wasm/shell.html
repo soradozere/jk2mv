@@ -102,6 +102,12 @@
             },
             printErr: function (text) {
                 if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
+                // Bounded ring buffer: the devtools console evicts early startup
+                // lines long before they can be read back, and an unbounded array
+                // is enough output to lock the tab up.
+                var b = window.__log || (window.__log = []);
+                b.push(text);
+                if (b.length > 400) b.shift();
                 console.error(text);
             },
             canvas: canvasElement,
