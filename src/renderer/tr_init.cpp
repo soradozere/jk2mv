@@ -1311,16 +1311,14 @@ Ghoul2 Insert End
 R_Init
 ===============
 */
-extern void WASMDBG_ProbeImageMap(const char *tag);
-extern void WASMDBG_WalkImageMap(const char *tag);
+
 
 void R_Init( void ) {
 	int i;
 	byte *ptr;
 
 	ri.Printf( PRINT_ALL, "----- R_Init -----\n" );
-	WASMDBG_ProbeImageMap("R_Init entry");
-	WASMDBG_WalkImageMap("R_Init entry");
+
 
 	// clear all our internal state
 	Com_Memset( &tr, 0, sizeof( tr ) );
@@ -1334,7 +1332,6 @@ void R_Init( void ) {
 #ifndef DEDICATED
 	Com_Memset( tess.constantColor255, 255, sizeof( tess.constantColor255 ) );
 #endif
-	WASMDBG_ProbeImageMap("R_Init after memsets");
 	//
 	// init function tables
 	//
@@ -1388,12 +1385,9 @@ void R_Init( void ) {
 	{
 		RE_SetLightStyle(i, -1);
 	}
-	Com_Printf("WASMDBG: before InitOpenGL\n");
 	InitOpenGL();
-	Com_Printf("WASMDBG: after InitOpenGL, before R_InitImages\n");
 
 	R_InitImages();
-	Com_Printf("WASMDBG: after R_InitImages\n");
 	R_InitShaders();
 	R_InitSkins();
 	R_InitFonts();
@@ -1410,7 +1404,6 @@ void R_Init( void ) {
 
 	GL_CheckErrors();
 #endif
-	WASMDBG_WalkImageMap("finished R_Init");
 	ri.Printf( PRINT_ALL, "----- finished R_Init -----\n" );
 }
 

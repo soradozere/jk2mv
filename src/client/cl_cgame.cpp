@@ -495,6 +495,20 @@ rescan:
 	Cmd_TokenizeString( s );
 	cmd = Cmd_Argv(0);
 
+	// Drop chat during demo playback before the game module ever sees it, so it
+	// can't reach the chat box, the console or the team-chat overlay. Returning
+	// qfalse is the same "silently skip" path bcs0/bcs1 use below: cgame's
+	// CG_ExecuteNewServerCommands just advances past it without printing, so the
+	// command sequence stays intact. Filtering here rather than in cgame also
+	// means it holds for both the 1.02 and 1.04 modules.
+	if ( clc.demoplaying && cl_demoSuppressChat && cl_demoSuppressChat->integer ) {
+		if ( !strcmp( cmd, "chat" ) || !strcmp( cmd, "tchat" ) ||
+			 !strcmp( cmd, "vchat" ) || !strcmp( cmd, "vtchat" ) || !strcmp( cmd, "vtell" ) ) {
+			Com_DPrintf( "suppressed demo chat command: %s\n", cmd );
+			return qfalse;
+		}
+	}
+
 	if ( !strcmp( cmd, "disconnect" ) ) {
 		Com_Error (ERR_SERVERDISCONNECT, "%s", SP_GetStringTextString("SVINGAME_SERVER_DISCONNECTED"));//"Server disconnected");
 	}

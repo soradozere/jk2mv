@@ -264,7 +264,6 @@ int main(int argc, char* argv[]) {
 	}
 
 	Com_Init(commandLine);
-	Com_Printf("WASMDBG: Com_Init returned successfully\n");
 
 	if ( missingFuncs ) {
 		static const char *missingFuncsError =
@@ -286,9 +285,7 @@ int main(int argc, char* argv[]) {
 #ifdef __EMSCRIPTEN__
 	// A blocking while(true) loop stalls the browser's JS thread forever.
 	// Yield to the browser each frame instead, driven by requestAnimationFrame.
-	Com_Printf("WASMDBG: about to call emscripten_set_main_loop\n");
 	emscripten_set_main_loop(Com_Frame, 0, 1);
-	Com_Printf("WASMDBG: emscripten_set_main_loop returned (unexpected if simulate_infinite_loop=1)\n");
 #else
 	while (!sys_signal) {
 		if (com_busyWait->integer) {

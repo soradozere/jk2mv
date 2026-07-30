@@ -23,6 +23,8 @@
 cvar_t	*cl_nodelta;
 cvar_t	*cl_debugMove;
 
+cvar_t	*cl_demoSuppressChat;
+
 cvar_t	*cl_noprint;
 cvar_t	*cl_motd;
 
@@ -568,20 +570,14 @@ void CL_PlayDemo_f( void ) {
 		return;
 	}
 
-	Com_Printf("WASMDBG: CL_PlayDemo_f entered, arg='%s'\n", Cmd_Argv(1));
-	extern void WASMDBG_WalkImageMap(const char *tag);
-	WASMDBG_WalkImageMap("CL_PlayDemo_f entry");
 
 	Q_strncpyz(arg, Cmd_Argv(1), sizeof(arg));
 
 	// make sure a local server is killed
 	Cvar_Set( "sv_killserver", "1" );
-	Com_Printf("WASMDBG: before SV_Frame\n");
 	SV_Frame( 0 );
-	Com_Printf("WASMDBG: after SV_Frame, before CL_Disconnect\n");
 
 	CL_Disconnect( qtrue );
-	Com_Printf("WASMDBG: after CL_Disconnect\n");
 
 	/* MrE: 2000-09-13: now called in CL_DownloadsComplete
 	CL_FlushMemory( );
@@ -629,7 +625,6 @@ void CL_PlayDemo_f( void ) {
 			}
 		}
 	}
-	Com_Printf("WASMDBG: demo file opened successfully\n");
 	Q_strncpyz( clc.demoName, arg, sizeof( clc.demoName ) );
 
 	Con_Close();
@@ -649,14 +644,10 @@ void CL_PlayDemo_f( void ) {
 		MV_SetCurrentGameversion(VERSION_1_04);
 	}
 
-	Com_Printf("WASMDBG: before CL_ReadDemoMessage loop, cls.state=%d\n", cls.state);
 	// read demo messages until connected
-	int wasmdbg_iter = 0;
 	while ( cls.state >= CA_CONNECTED && cls.state < CA_PRIMED ) {
-		Com_Printf("WASMDBG: CL_ReadDemoMessage iter %d, cls.state=%d\n", wasmdbg_iter++, cls.state);
 		CL_ReadDemoMessage();
 	}
-	Com_Printf("WASMDBG: after CL_ReadDemoMessage loop, %d iterations, cls.state=%d\n", wasmdbg_iter, cls.state);
 	// don't get the first snapshot this frame, to prevent the long
 	// time from the gamestate load from messing causing a time skip
 	clc.firstDemoFrameSkipped = qfalse;
@@ -2675,10 +2666,7 @@ void CL_StartHunkUsers( void ) {
 	}
 
 	if ( !cls.uiStarted ) {
-		extern void WASMDBG_WalkImageMap(const char *tag);
-		WASMDBG_WalkImageMap("before CL_InitUI");
 		CL_InitUI(MV_GetCurrentGameversion() == VERSION_UNDEF ? qtrue : qfalse);
-		WASMDBG_WalkImageMap("after CL_InitUI");
 	}
 }
 
@@ -2958,6 +2946,12 @@ void CL_Init( void ) {
 	Cvar_Get ("cg_viewsize", "100", CVAR_ARCHIVE );
 	
 	// autorecord
+	// Suppress in-game chat during demo playback. Demos are replayed publicly,
+	// and chat is free-form text from everyone who was in the server -- including
+	// spectators, whose talk isn't part of the match. Deliberately not archived,
+	// so a stale config can never silently turn it back on.
+	cl_demoSuppressChat = Cvar_Get ("cl_demoSuppressChat", "1", 0 );
+
 	cl_autoDemo = Cvar_Get ("cl_autoDemo", "0", CVAR_ARCHIVE | CVAR_GLOBAL );
 	cl_autoDemoFormat = Cvar_Get ("cl_autoDemoFormat", "%t_%m", CVAR_ARCHIVE | CVAR_GLOBAL );
 

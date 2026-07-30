@@ -106,7 +106,6 @@ void GL_TextureMode( const char *string ) {
 
 #ifdef __EMSCRIPTEN__
 	if ( g_wasmSkipStaleTextureRebind ) {
-		Com_Printf("WASMDBG: GL_TextureMode skipping stale image rebind\n");
 		return;
 	}
 #endif
@@ -809,52 +808,9 @@ typedef map <const char *, image_t *, CStringComparator>	AllocatedImages_t;
 													AllocatedImages_t::iterator itAllocatedImages;
 int giTextureBindNum = 1024;	// will be set to this anyway at runtime, but wtf?
 
-void WASMDBG_ProbeImageMap(const char *tag) {
-	Com_Printf("WASMDBG_PROBE(%s): size()=%d\n", tag, (int)AllocatedImages.size());
-	AllocatedImages_t::iterator it = AllocatedImages.find("*default");
-	Com_Printf("WASMDBG_PROBE(%s): find(*default)=%p\n", tag, it != AllocatedImages.end() ? (void*)it->second : (void*)0);
-}
 
 // full in-order walk -- touches every node's successor pointers, unlike
 // find() which only visits nodes on one root-to-leaf search path
-// Bounded, self-validating walk. Checks the two invariants a std::map<const char*>
-// silently depends on: (1) keys stay in strict strcmp order, (2) each key still
-// points at its own image_t's imgName buffer (i.e. the image wasn't freed).
-void WASMDBG_WalkImageMap(const char *tag) {
-	int count = 0;
-	int expected = (int)AllocatedImages.size();
-	const char *prev = NULL;
-
-	// hard cap, independent of size() -- size() itself may be corrupt
-	const int HARD_CAP = 500;
-	if (expected < 0 || expected > HARD_CAP) {
-		Com_Printf("WASMDBG_WALK BAD-SIZE (%s): size()=%d is implausible -- map control block corrupt\n", tag, expected);
-		return;
-	}
-
-	for (AllocatedImages_t::iterator it = AllocatedImages.begin(); it != AllocatedImages.end(); ++it) {
-		const char *key = it->first;
-		image_t *img = it->second;
-
-		if (img && key != img->imgName) {
-			Com_Printf("WASMDBG_WALK BAD-KEY (%s) at %d: key=%p imgName=%p ('%s')\n",
-				tag, count, (const void*)key, (void*)img->imgName, key);
-			return;
-		}
-
-		if (prev && strcmp(prev, key) >= 0) {
-			Com_Printf("WASMDBG_WALK ORDER-VIOLATION (%s) at %d: '%s' then '%s'\n", tag, count, prev, key);
-			return;
-		}
-		prev = key;
-
-		if (++count > HARD_CAP) {
-			Com_Printf("WASMDBG_WALK CYCLE (%s): passed hard cap, size()=%d, tree has a loop\n", tag, expected);
-			return;
-		}
-	}
-	Com_Printf("WASMDBG_WALK ok (%s): %d nodes\n", tag, count);
-}
 
 
 // return = number of images in the list, for those interested
@@ -884,7 +840,6 @@ static void R_Images_DeleteImageContents( image_t *pImage )
 	assert(pImage);	// should never be called with NULL
 	if (pImage)
 	{
-		Com_Printf("WASMDBG_FREE: image '%s' ptr=%p texnum=%d\n", pImage->imgName, (void*)pImage, pImage->texnum);
 		qglDeleteTextures( 1, &pImage->texnum );
 
 		Z_Free(pImage);
@@ -1151,7 +1106,6 @@ void RE_RegisterImages_Info_f( void )
 //
 qboolean RE_RegisterImages_LevelLoadEnd(void)
 {
-	Com_Printf("WASMDBG_PURGE: RE_RegisterImages_LevelLoadEnd() entered (size=%d)\n", (int)AllocatedImages.size());
 	ri.Printf( PRINT_DEVELOPER, "RE_RegisterImages_LevelLoadEnd():\n");
 
 //	int iNumImages = AllocatedImages.size();	// more for curiosity, really.
@@ -1284,7 +1238,6 @@ image_t *R_CreateImageNew( const char *name, byte * const *mipmaps, qboolean cus
 	image_t		*image;
 	qboolean	isLightmap = qfalse;
 
-	Com_Printf("WASMDBG: R_CreateImageNew entry (%s) %dx%d customMip=%d\n", name, width, height, customMip);
 
 	if (strlen(name) >= MAX_QPATH ) {
 		ri.Error (ERR_DROP, "R_CreateImage: \"%s\" is too long", name);
@@ -1340,21 +1293,15 @@ image_t *R_CreateImageNew( const char *name, byte * const *mipmaps, qboolean cus
 		GL_SelectTexture( image->TMU );
 	}
 
-	bool wasmdbg_trace = (strstr(name, "crosshairh") != NULL);
-	if (wasmdbg_trace) Com_Printf("WASMDBG: [%s] before GL_Bind texnum=%d upload={noMipMaps=%d noPicMip=%d noLightScale=%d noTC=%d}\n", name, image->texnum, upload->noMipMaps, upload->noPicMip, upload->noLightScale, upload->noTC);
 	GL_Bind(image);
-	if (wasmdbg_trace) Com_Printf("WASMDBG: [%s] before Upload32\n", name);
 
 	Upload32( mipmaps, customMip, image, isLightmap, format );
-	if (wasmdbg_trace) Com_Printf("WASMDBG: [%s] after Upload32\n", name);
 
 	qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, glWrapClampMode );
 	qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, glWrapClampMode );
-	if (wasmdbg_trace) Com_Printf("WASMDBG: [%s] after wrap TexParameteri\n", name);
 
 	qglBindTexture( GL_TEXTURE_2D, 0 );	//jfm: i don't know why this is here, but it breaks lightmaps when there's only 1
 	glState.currenttextures[glState.currenttmu] = 0;	//mark it not bound
-	if (wasmdbg_trace) Com_Printf("WASMDBG: [%s] after unbind\n", name);
 
 	if ( image->TMU == 1 ) {
 		GL_SelectTexture( 0 );
@@ -1362,10 +1309,7 @@ image_t *R_CreateImageNew( const char *name, byte * const *mipmaps, qboolean cus
 
     const char *psNewName = GenerateImageMappingName(name);
 	Q_strncpyz(image->imgName, psNewName, sizeof(image->imgName));
-	if (wasmdbg_trace) Com_Printf("WASMDBG: [%s] before map insert, size()=%d\n", name, (int)AllocatedImages.size());
 	AllocatedImages[ image->imgName ] = image;
-	if (wasmdbg_trace) Com_Printf("WASMDBG: [%s] after map insert, size()=%d\n", name, (int)AllocatedImages.size());
-	WASMDBG_WalkImageMap(image->imgName);
 
 	return image;
 }
@@ -2949,13 +2893,11 @@ void R_CreateBuiltinImages( void ) {
 
 	tr.identityLightImage = R_CreateImage("*identityLight", (byte *)data, 8, 8, qfalse, qfalse, qfalse, GL_REPEAT, PXF_GRAY );
 
-	WASMDBG_WalkImageMap("before scratch loop");
 
 	for(x=0;x<32;x++) {
 		// scratchimage is usually used for cinematic drawing
 		tr.scratchImage[x] = R_CreateImage(va("*scratch%d",x), (byte *)data, DEFAULT_SIZE, DEFAULT_SIZE, qfalse, qtrue, qfalse, GL_CLAMP, PXF_GRAY );
 	}
-	WASMDBG_WalkImageMap("after scratch loop");
 
 	if (r_newDLights->integer)
 	{
@@ -2965,9 +2907,7 @@ void R_CreateBuiltinImages( void ) {
 	{
 		R_CreateDlightImage();
 	}
-	Com_Printf("WASMDBG: after dlight branch\n");
 	R_CreateFogImage();
-	Com_Printf("WASMDBG: after R_CreateFogImage\n");
 }
 
 /*

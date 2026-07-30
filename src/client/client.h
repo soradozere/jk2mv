@@ -458,6 +458,7 @@ extern	cvar_t	*mv_menuOverride;
 
 extern	cvar_t	*cl_autoDemo;
 extern	cvar_t	*cl_autoDemoFormat;
+extern	cvar_t	*cl_demoSuppressChat;
 
 //=================================================
 
