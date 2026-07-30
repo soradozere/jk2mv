@@ -431,7 +431,12 @@ static void GLimp_InitExtensions(void) {
 			qglActiveTextureARB = (PFNGLACTIVETEXTUREARBPROC)WIN_GL_GetProcAddress("glActiveTextureARB");
 			qglClientActiveTextureARB = (PFNGLCLIENTACTIVETEXTUREARBPROC)WIN_GL_GetProcAddress("glClientActiveTextureARB");
 
-			if (qglActiveTextureARB) {
+			// GL_SelectTexture() calls both glActiveTextureARB and
+			// glClientActiveTextureARB, so all three entry points have to be
+			// present -- GL4ES's GLES2 backend advertises the extension but
+			// doesn't export glClientActiveTextureARB, which would leave a NULL
+			// call through the "multitexture available" path.
+			if (qglActiveTextureARB && qglClientActiveTextureARB && qglMultiTexCoord2fARB) {
 				qglGetIntegerv(GL_MAX_TEXTURE_UNITS_ARB, &glConfig.maxActiveTextures);
 
 				if (glConfig.maxActiveTextures > 1) {
@@ -442,6 +447,11 @@ static void GLimp_InitExtensions(void) {
 					qglClientActiveTextureARB = NULL;
 					Com_Printf("...not using GL_ARB_multitexture, < 2 texture units\n");
 				}
+			} else {
+				qglMultiTexCoord2fARB = NULL;
+				qglActiveTextureARB = NULL;
+				qglClientActiveTextureARB = NULL;
+				Com_Printf("...not using GL_ARB_multitexture, incomplete entry points\n");
 			}
 		} else {
 			Com_Printf("...ignoring GL_ARB_multitexture\n");
@@ -639,6 +649,10 @@ static void GLimp_InitOpenGLVersion(void) {
 ** setting variables, checking GL constants, and reporting the gfx system config
 ** to the user.
 */
+#ifdef __EMSCRIPTEN__
+bool g_wasmSkipStaleTextureRebind = false;
+#endif
+
 static void InitOpenGL(void) {
 	if (glConfig.vidWidth == 0) {
 		windowDesc_t windowDesc = { GRAPHICS_API_OPENGL };
@@ -648,11 +662,45 @@ static void InitOpenGL(void) {
 
 		Com_Printf("GL_RENDERER: %s\n", (const char *)qglGetString(GL_RENDERER));
 
-		// get our config strings
-		glConfig.vendor_string = (const char *)qglGetString(GL_VENDOR);
-		glConfig.renderer_string = (const char *)qglGetString(GL_RENDERER);
-		glConfig.version_string = (const char *)qglGetString(GL_VERSION);
-		glConfig.extensions_string = (const char *)qglGetString(GL_EXTENSIONS);
+		// get our config strings.
+		// Take owned copies rather than holding the driver's pointers: GL4ES builds
+		// these (notably the extension list) in its own buffers, so keeping the raw
+		// pointers leaves glConfig referencing memory we don't own for the whole
+		// session. Q_stristr then scans off the end of it looking for a terminator.
+		{
+			static char s_vendor[MAX_STRING_CHARS];
+			static char s_renderer[MAX_STRING_CHARS];
+			static char s_version[MAX_STRING_CHARS];
+			static char s_extensions[BIG_INFO_STRING];
+
+			// GL4ES's BuildExtensionsList() only populates glstate->extensions when
+			// that field is already zero, i.e. it assumes freshly-allocated state is
+			// zero-filled. That holds for Emscripten's normal allocator but not under
+			// ASan (which poisons new memory), so it can hand back an uninitialised
+			// pointer. Sanity-check what the driver returns before dereferencing it.
+			#define GLSTR_OK(p) ((p) != NULL && (uintptr_t)(p) < 0x7FFFFFFFu)
+
+			const char *v   = (const char *)qglGetString(GL_VENDOR);
+			const char *r   = (const char *)qglGetString(GL_RENDERER);
+			const char *ver = (const char *)qglGetString(GL_VERSION);
+			const char *ext = (const char *)qglGetString(GL_EXTENSIONS);
+
+			if (!GLSTR_OK(ext)) {
+				Com_Printf(S_COLOR_YELLOW "WARNING: driver returned an invalid GL_EXTENSIONS string (%p); treating as empty\n", (const void*)ext);
+				ext = "";
+			}
+
+			Q_strncpyz(s_vendor,     GLSTR_OK(v)   ? v   : "", sizeof(s_vendor));
+			Q_strncpyz(s_renderer,   GLSTR_OK(r)   ? r   : "", sizeof(s_renderer));
+			Q_strncpyz(s_version,    GLSTR_OK(ver) ? ver : "", sizeof(s_version));
+			Q_strncpyz(s_extensions, ext, sizeof(s_extensions));
+			#undef GLSTR_OK
+
+			glConfig.vendor_string     = s_vendor;
+			glConfig.renderer_string   = s_renderer;
+			glConfig.version_string    = s_version;
+			glConfig.extensions_string = s_extensions;
+		}
 
 		// OpenGL driver constants
 		qglGetIntegerv(GL_MAX_TEXTURE_SIZE, &glConfig.maxTextureSize);
@@ -668,9 +716,20 @@ static void InitOpenGL(void) {
 		WIN_InitGammaMethod(&glConfig);
 
 		// set default state
+#ifdef __EMSCRIPTEN__
+		g_wasmSkipStaleTextureRebind = false;
+#endif
 		GL_SetDefaultState();
 	} else {
-		// set default state
+		// set default state.
+		// On Emscripten a "soft" restart (no window/context recreation) reuses
+		// the live GL context and its already-uploaded textures, so re-touching
+		// them here is redundant -- and rebinding these specific leftover
+		// textures hangs GL4ES on this port. Skip it; new images get the
+		// current filter mode when they're uploaded anyway.
+#ifdef __EMSCRIPTEN__
+		g_wasmSkipStaleTextureRebind = true;
+#endif
 		GL_SetDefaultState();
 	}
 }
@@ -1068,7 +1127,15 @@ void R_Register( void )
 	r_ext_preferred_tc_method = ri.Cvar_Get("r_ext_preferred_tc_method", "0", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 	r_ext_gamma_control = ri.Cvar_Get("r_ext_gamma_control", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 	r_ext_multitexture = ri.Cvar_Get("r_ext_multitexture", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
+#ifdef __EMSCRIPTEN__
+	// GL4ES's GLES2 backend advertises GL_EXT_compiled_vertex_array (a legacy
+	// perf hint with no real GLES2 equivalent) but doesn't actually export
+	// glLockArraysEXT/glUnlockArraysEXT, so WIN_GL_GetProcAddress returns NULL
+	// and the engine treats that as fatal ("bad getprocaddress"). Default off.
+	r_ext_compiled_vertex_array = ri.Cvar_Get("r_ext_compiled_vertex_array", "0", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
+#else
 	r_ext_compiled_vertex_array = ri.Cvar_Get("r_ext_compiled_vertex_array", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
+#endif
 	r_ext_texture_env_add = ri.Cvar_Get("r_ext_texture_env_add", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 	r_ext_texture_filter_anisotropic = ri.Cvar_Get("r_ext_texture_filter_anisotropic", "2", CVAR_ARCHIVE | CVAR_GLOBAL);
 
@@ -1244,11 +1311,16 @@ Ghoul2 Insert End
 R_Init
 ===============
 */
+extern void WASMDBG_ProbeImageMap(const char *tag);
+extern void WASMDBG_WalkImageMap(const char *tag);
+
 void R_Init( void ) {
 	int i;
 	byte *ptr;
 
 	ri.Printf( PRINT_ALL, "----- R_Init -----\n" );
+	WASMDBG_ProbeImageMap("R_Init entry");
+	WASMDBG_WalkImageMap("R_Init entry");
 
 	// clear all our internal state
 	Com_Memset( &tr, 0, sizeof( tr ) );
@@ -1262,6 +1334,7 @@ void R_Init( void ) {
 #ifndef DEDICATED
 	Com_Memset( tess.constantColor255, 255, sizeof( tess.constantColor255 ) );
 #endif
+	WASMDBG_ProbeImageMap("R_Init after memsets");
 	//
 	// init function tables
 	//
@@ -1315,9 +1388,12 @@ void R_Init( void ) {
 	{
 		RE_SetLightStyle(i, -1);
 	}
+	Com_Printf("WASMDBG: before InitOpenGL\n");
 	InitOpenGL();
+	Com_Printf("WASMDBG: after InitOpenGL, before R_InitImages\n");
 
 	R_InitImages();
+	Com_Printf("WASMDBG: after R_InitImages\n");
 	R_InitShaders();
 	R_InitSkins();
 	R_InitFonts();
@@ -1334,6 +1410,7 @@ void R_Init( void ) {
 
 	GL_CheckErrors();
 #endif
+	WASMDBG_WalkImageMap("finished R_Init");
 	ri.Printf( PRINT_ALL, "----- finished R_Init -----\n" );
 }
 

@@ -595,11 +595,13 @@ static rserr_t GLimp_SetMode(glconfig_t *glConfig, const windowDesc_t *windowDes
 		);
 
 	// Destroy existing state if it exists
+#ifndef __EMSCRIPTEN__
 	if( opengl_context != NULL )
 	{
 		SDL_GL_DeleteContext( opengl_context );
 		opengl_context = NULL;
 	}
+#endif
 
 	// If a window exists, note its display index
 	if ( screen != NULL )
@@ -612,8 +614,10 @@ static rserr_t GLimp_SetMode(glconfig_t *glConfig, const windowDesc_t *windowDes
 
 		SDL_GetWindowPosition( screen, &x, &y );
 		Com_DPrintf( "Existing window at %dx%d before being destroyed\n", x, y );
+#ifndef __EMSCRIPTEN__
 		SDL_DestroyWindow( screen );
 		screen = NULL;
+#endif
 	} else {
 		if ( GLimp_GetSavedWindowPosition( &display, &x, &y ) )
 			Com_DPrintf( "Found saved window at %dx%d display %d\n", x, y, display );
@@ -813,6 +817,9 @@ static rserr_t GLimp_SetMode(glconfig_t *glConfig, const windowDesc_t *windowDes
 			SDL_GL_SetAttribute( SDL_GL_DOUBLEBUFFER, 1 );
 			SDL_GL_SetAttribute( SDL_GL_ACCELERATED_VISUAL, !r_allowsoftwaregl->integer);
 
+#ifdef __EMSCRIPTEN__
+			if ( screen == NULL ) {
+#endif
 			if( ( screen = SDL_CreateWindow( windowTitle, x, y,
 					winWidth, winHeight, flags ) ) == NULL )
 			{
@@ -829,6 +836,11 @@ static rserr_t GLimp_SetMode(glconfig_t *glConfig, const windowDesc_t *windowDes
 				Com_DPrintf( "SDL_CreateWindow failed: %s\n", SDL_GetError( ) );
 				continue;
 			}
+#ifdef __EMSCRIPTEN__
+			} else {
+				SDL_SetWindowSize( screen, winWidth, winHeight );
+			}
+#endif
 
 #ifndef MACOS_X
 			SDL_SetWindowIcon(screen, icon);
@@ -857,13 +869,24 @@ static rserr_t GLimp_SetMode(glconfig_t *glConfig, const windowDesc_t *windowDes
 				}
 			}
 
+#ifdef __EMSCRIPTEN__
+			if ( opengl_context == NULL )
+			{
+#endif
 			if( ( opengl_context = SDL_GL_CreateContext( screen ) ) == NULL )
 			{
 				Com_Printf( "SDL_GL_CreateContext failed: %s\n", SDL_GetError( ) );
 				continue;
 			}
+#ifdef __EMSCRIPTEN__
+			}
+#endif
 
+#ifdef __EMSCRIPTEN__
+			if ( SDL_GL_SetSwapInterval( 1 ) == -1 )
+#else
 			if ( SDL_GL_SetSwapInterval( r_swapInterval->integer ) == -1 )
+#endif
 			{
 				Com_DPrintf( "SDL_GL_SetSwapInterval failed: %s\n", SDL_GetError() );
 			}

@@ -18,6 +18,7 @@
 #endif
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+extern "C" void initialize_gl4es();
 #endif
 #include "../qcommon/qcommon.h"
 #include "../sys/sys_local.h"
@@ -225,6 +226,16 @@ int main(int argc, char* argv[]) {
 #endif
 	CON_Init();
 
+#ifdef __EMSCRIPTEN__
+	// GL4ES must be initialised before any GL call. Its context setup normally
+	// runs from its own EGL/GLX layer, which we bypass by taking SDL2's GL
+	// context directly -- without this, GL4ES's global `glstate` stays NULL and
+	// every entry point dereferences NULL+offset, silently reading and writing
+	// over the bottom of linear memory.
+	setenv("LIBGL_VSYNC", "1", 1);
+	initialize_gl4es();
+#endif
+
 	// get the initial time base
 	Sys_Milliseconds();
 
@@ -253,6 +264,7 @@ int main(int argc, char* argv[]) {
 	}
 
 	Com_Init(commandLine);
+	Com_Printf("WASMDBG: Com_Init returned successfully\n");
 
 	if ( missingFuncs ) {
 		static const char *missingFuncsError =
@@ -274,7 +286,9 @@ int main(int argc, char* argv[]) {
 #ifdef __EMSCRIPTEN__
 	// A blocking while(true) loop stalls the browser's JS thread forever.
 	// Yield to the browser each frame instead, driven by requestAnimationFrame.
+	Com_Printf("WASMDBG: about to call emscripten_set_main_loop\n");
 	emscripten_set_main_loop(Com_Frame, 0, 1);
+	Com_Printf("WASMDBG: emscripten_set_main_loop returned (unexpected if simulate_infinite_loop=1)\n");
 #else
 	while (!sys_signal) {
 		if (com_busyWait->integer) {

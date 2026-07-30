@@ -477,6 +477,10 @@ set(EMS_LINK_FLAGS
     "-sINITIAL_MEMORY=134217728"
     "-sEXPORTED_RUNTIME_METHODS=['FS','run','callMain']"
     "-sSTACK_SIZE=5MB"
+    "-sASSERTIONS=1"
+    "-sSTACK_OVERFLOW_CHECK=1" # this was firing for real: GL4ES writing through a NULL glstate was
+                               # clobbering low memory including the stack cookie. Keep it enabled.
+    "--profiling-funcs" # keep function names in the wasm binary so crash stack traces are symbolicated, not just addresses
     "--shell-file" "${CMAKE_SOURCE_DIR}/shell.html"
     "--preload-file" "${ProjectRoot}/GameData/base@base"
 )

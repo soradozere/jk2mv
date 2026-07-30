@@ -4,6 +4,7 @@
 #include <setjmp.h>
 #ifndef WIN32
 # include <fenv.h>
+# include <unistd.h> // WASMDBG: for raw write()
 #endif
 
 #include "../qcommon/q_shared.h"
@@ -1860,15 +1861,26 @@ Hunk_Clear
 The server calls this before shutting down or loading a new map
 =================
 */
+void WASMDBG_ProbeImageMap(const char *tag);
+void WASMDBG_WalkImageMap(const char *tag);
+
 void Hunk_Clear( void ) {
 
+	WASMDBG_ProbeImageMap("Hunk_Clear entry");
+	WASMDBG_WalkImageMap("Hunk_Clear entry");
 #ifndef DEDICATED
 	CL_ShutdownCGame();
+	WASMDBG_ProbeImageMap("after CL_ShutdownCGame");
 	CL_ShutdownUI();
+	WASMDBG_ProbeImageMap("after CL_ShutdownUI");
+	WASMDBG_WalkImageMap("after CL_ShutdownUI");
 #endif
 	SV_ShutdownGameProgs();
+	WASMDBG_ProbeImageMap("after SV_ShutdownGameProgs");
 #ifndef DEDICATED
 	CIN_CloseAllVideos();
+	WASMDBG_ProbeImageMap("after CIN_CloseAllVideos");
+	WASMDBG_WalkImageMap("after CIN_CloseAllVideos");
 #endif
 	hunk_low.mark = 0;
 	hunk_low.permanent = 0;
@@ -1885,6 +1897,8 @@ void Hunk_Clear( void ) {
 
 	Com_Printf( "Hunk_Clear: reset the hunk ok\n" );
 	VM_Clear();
+	WASMDBG_ProbeImageMap("after VM_Clear (Hunk_Clear exit)");
+	WASMDBG_WalkImageMap("after VM_Clear (Hunk_Clear exit)");
 #ifdef HUNK_DEBUG
 	hunkblocks = NULL;
 #endif
@@ -2845,6 +2859,12 @@ void Com_Frame( void ) {
 	int		msec, minMsec;
 	int		timeVal;
 	static int	lastTime = 0, bias = 0;
+	static qboolean wasmdbg_first = qtrue;
+	if (wasmdbg_first) {
+		wasmdbg_first = qfalse;
+		static const char wasmdbg_msg[] = "WASMDBG_RAW: Com_Frame first call reached\n";
+		write(2, wasmdbg_msg, sizeof(wasmdbg_msg) - 1); // unbuffered, bypasses stdio entirely
+	}
 
 	int timeBeforeFirstEvents = 0;
 	int timeBeforeServer = 0;
@@ -2916,7 +2936,9 @@ void Com_Frame( void ) {
 
 	msec = com_frameTime - lastTime;
 
+	Com_Printf("WASMDBG: before first Cbuf_Execute\n");
 	Cbuf_Execute();
+	Com_Printf("WASMDBG: after first Cbuf_Execute\n");
 
 	// mess with msec if needed
 	com_frameMsec = msec;
@@ -2963,7 +2985,9 @@ void Com_Frame( void ) {
 			timeBeforeEvents = Sys_Milliseconds ();
 		}
 		Com_EventLoop();
+		Com_Printf("WASMDBG: before second Cbuf_Execute\n");
 		Cbuf_Execute ();
+		Com_Printf("WASMDBG: after second Cbuf_Execute, before CL_Frame\n");
 
 
 		//
@@ -2974,6 +2998,7 @@ void Com_Frame( void ) {
 		}
 
 		CL_Frame( msec );
+		Com_Printf("WASMDBG: after CL_Frame\n");
 
 		if ( com_speeds->integer ) {
 			timeAfter = Sys_Milliseconds ();
