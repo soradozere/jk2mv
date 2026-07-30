@@ -296,6 +296,16 @@ void CON_Init( void )
 {
 	struct termios tc;
 
+#ifdef __EMSCRIPTEN__
+	// There's no terminal behind stdin in a browser. Leaving stdin "active"
+	// makes CON_Input() read(STDIN_FILENO) every frame, which Emscripten
+	// services with a modal window.prompt("Input: ") -- blocking the page on
+	// a dialog the user has to dismiss over and over.
+	ttycon_on = qfalse;
+	stdin_active = qfalse;
+	return;
+#endif
+
 	// If the process is backgrounded (running non interactively)
 	// then SIGTTIN or SIGTOU is emitted, if not caught, turns into a SIGSTP
 	signal(SIGTTIN, SIG_IGN);
