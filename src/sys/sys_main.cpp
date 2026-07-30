@@ -16,6 +16,9 @@
 #ifndef DEDICATED
 #include "SDL.h"
 #endif
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include "../qcommon/qcommon.h"
 #include "../sys/sys_local.h"
 #include "../sys/sys_public.h"
@@ -268,6 +271,11 @@ int main(int argc, char* argv[]) {
 	}
 
 	// main game loop
+#ifdef __EMSCRIPTEN__
+	// A blocking while(true) loop stalls the browser's JS thread forever.
+	// Yield to the browser each frame instead, driven by requestAnimationFrame.
+	emscripten_set_main_loop(Com_Frame, 0, 1);
+#else
 	while (!sys_signal) {
 		if (com_busyWait->integer) {
 			bool shouldSleep = false;
@@ -290,6 +298,7 @@ int main(int argc, char* argv[]) {
 	}
 
 	Com_Quit(sys_signal);
+#endif
 
 #if defined(_MSC_VER) && !defined(_DEBUG)
 	} __except(Sys_NoteException(GetExceptionInformation(), GetExceptionCode())) {

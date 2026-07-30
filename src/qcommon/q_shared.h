@@ -223,6 +223,9 @@
 #elif idppc
 #define ARCH_STRING "ppc"
 #define Q_BIG_ENDIAN
+#elif defined(__EMSCRIPTEN__)
+#define ARCH_STRING "wasm32"
+#define Q_LITTLE_ENDIAN
 #else
 #error "Architecture not supported"
 #endif

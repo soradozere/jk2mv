@@ -31,6 +31,19 @@
 
 #include <mv_setup.h>
 
+#ifdef __EMSCRIPTEN__
+// Statically-linked module entry points (see wasm/CMakeLists.txt) -- the WASM build
+// has no dlopen/.so, so cgame/menu are compiled directly into this binary under
+// renamed symbols (mvcg_*/mvui_*, via wasm/gen_renames.py + -include) to avoid
+// colliding with each other's copy of ui_shared.c, vmMain, and dllEntry.
+extern "C" {
+	intptr_t mvcg_vmMain( intptr_t command, intptr_t arg0, intptr_t arg1, intptr_t arg2, intptr_t arg3, intptr_t arg4, intptr_t arg5, intptr_t arg6, intptr_t arg7, intptr_t arg8, intptr_t arg9, intptr_t arg10, intptr_t arg11 );
+	void mvcg_dllEntry( intptr_t (*syscallptr)(intptr_t, ...) );
+	intptr_t mvui_vmMain( intptr_t command, intptr_t arg0, intptr_t arg1, intptr_t arg2, intptr_t arg3, intptr_t arg4, intptr_t arg5, intptr_t arg6, intptr_t arg7, intptr_t arg8, intptr_t arg9, intptr_t arg10, intptr_t arg11 );
+	void mvui_dllEntry( intptr_t (*syscallptr)(intptr_t, ...) );
+}
+#endif
+
 //=============================================================================
 
 // Used to determine CD Path
@@ -712,6 +725,11 @@ void Sys_UnloadModuleLibrary(void *dllHandle) {
 		return;
 	}
 
+#ifdef __EMSCRIPTEN__
+	// dllHandle is a fake non-null sentinel for statically-linked modules -- nothing to close.
+	return;
+#endif
+
 	dlclose(dllHandle);
 }
 
@@ -727,6 +745,25 @@ void *Sys_LoadModuleLibrary(const char *name, qboolean mvOverride, VM_EntryPoint
 	char filename[MAX_QPATH];
 	const char *path, *filePath;
 	void *libHandle;
+
+#ifdef __EMSCRIPTEN__
+	// No dlopen in WASM. cgame/jk2mvmenu are statically linked under renamed
+	// symbols; return a fake non-null "handle" so the VM_Create caller proceeds
+	// normally. jk2mpgame (server-side) isn't linked at all -- demo playback
+	// never starts a server, so this path should never actually be hit for it.
+	if ( !Q_stricmp( name, "cgame" ) ) {
+		*entryPoint = (VM_EntryPoint_t)mvcg_vmMain;
+		mvcg_dllEntry( systemcalls );
+		return (void *)0x1;
+	} else if ( !Q_stricmp( name, "jk2mvmenu" ) || !Q_stricmp( name, "ui" ) ) {
+		*entryPoint = (VM_EntryPoint_t)mvui_vmMain;
+		mvui_dllEntry( systemcalls );
+		return (void *)0x1;
+	} else {
+		Com_Printf( "Sys_LoadModuleLibrary: no static WASM binding for module \"%s\"\n", name );
+		return NULL;
+	}
+#endif
 
 	Com_sprintf(filename, sizeof(filename), "%s_" ARCH_STRING "." LIBRARY_EXTENSION, name);
 

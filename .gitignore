@@ -99,3 +99,9 @@ GPATH
 
 # ignore all subdirectories of the build directory
 /build/*/*
+
+# WASM build artifacts and local assets (not for git)
+GameData/
+build-wasm/
+wasm/cg_rename.h
+wasm/ui_rename.h
