@@ -25,6 +25,21 @@ cvar_t	*cl_debugMove;
 
 cvar_t	*cl_demoSuppressChat;
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+extern "C" {
+// Current demo playback position, in server milliseconds, or -1 when no demo is
+// playing. Lets the page show/verify playback progress -- and it's the value a
+// timeline scrubber will need to drive.
+EMSCRIPTEN_KEEPALIVE int JKD_GetDemoTime( void ) {
+	if ( !clc.demoplaying ) {
+		return -1;
+	}
+	return cl.serverTime;
+}
+}
+#endif
+
 cvar_t	*cl_noprint;
 cvar_t	*cl_motd;
 

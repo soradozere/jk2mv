@@ -58,13 +58,153 @@
             padding: 5px;
             display: none;
         }
+
+        /* Playback controls. Kept out of the way until the pointer is near the
+           bottom of the frame, so they don't sit over the action while watching. */
+        #controls {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 50;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 14px 18px;
+            background: linear-gradient(to top, rgba(8, 10, 14, 0.94), rgba(8, 10, 14, 0.72) 60%, rgba(8, 10, 14, 0));
+            font-size: 12px;
+            opacity: 0;
+            transform: translateY(8px);
+            transition: opacity .18s ease, transform .18s ease;
+        }
+
+        #controls.show,
+        #controls:hover,
+        #controls:focus-within {
+            opacity: 1;
+            transform: none;
+        }
+
+        #controls .row {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            flex-wrap: wrap;
+        }
+
+        /* display:flex above would otherwise win over the hidden attribute */
+        #controls .row[hidden],
+        #controls[hidden] {
+            display: none;
+        }
+
+        #controls .group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            min-width: 130px;
+        }
+
+        #controls .group.grow {
+            flex: 1 1 160px;
+        }
+
+        #controls label {
+            color: #93a1b5;
+            font-size: 11px;
+            letter-spacing: .02em;
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        #controls .val {
+            color: #e6edf6;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .btn {
+            background: rgba(255, 255, 255, .08);
+            color: #e6edf6;
+            border: 1px solid rgba(255, 255, 255, .16);
+            border-radius: 6px;
+            padding: 7px 12px;
+            font: inherit;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .btn:hover {
+            background: rgba(255, 255, 255, .15);
+        }
+
+        .btn.wide {
+            min-width: 84px;
+        }
+
+        .btn.on {
+            background: #2f81f7;
+            border-color: #2f81f7;
+            color: #fff;
+        }
+
+        .speeds {
+            display: flex;
+            gap: 4px;
+        }
+
+        .speeds .btn {
+            padding: 6px 9px;
+        }
+
+        #controls input[type=range] {
+            width: 100%;
+            accent-color: #2f81f7;
+            cursor: pointer;
+        }
     </style>
 </head>
 
 <body>
     <div id="status">Downloading...</div>
-    <div id="version-marker" style="position:fixed; top:10px; right:10px; color:red; font-size:10px; z-index:100;">Shell: 11:13</div>
     <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+
+    <div id="controls" hidden>
+        <div class="row">
+            <button id="playPause" class="btn wide" title="Play / pause (Space)">Pause</button>
+
+            <div class="group">
+                <label>Speed</label>
+                <div class="speeds" id="speeds"></div>
+            </div>
+
+            <div class="group grow">
+                <label>Field of view <span class="val" id="fovVal">80</span></label>
+                <input type="range" id="fov" min="60" max="130" step="1" value="80">
+            </div>
+
+            <div class="group">
+                <label>View</label>
+                <button id="viewToggle" class="btn">First person</button>
+            </div>
+        </div>
+
+        <div class="row" id="orbitRow" hidden>
+            <div class="group grow">
+                <label>Camera distance <span class="val" id="rangeVal">80</span></label>
+                <input type="range" id="range" min="20" max="400" step="5" value="80">
+            </div>
+            <div class="group grow">
+                <label>Camera angle <span class="val" id="angleVal">0</span>&deg;</label>
+                <input type="range" id="angle" min="-180" max="180" step="5" value="0">
+            </div>
+            <div class="group grow">
+                <label>Camera height <span class="val" id="heightVal">0</span></label>
+                <input type="range" id="height" min="-60" max="120" step="5" value="0">
+            </div>
+        </div>
+    </div>
+
     <div id="output"></div>
 
     <script type='text/javascript'>
@@ -130,6 +270,130 @@
         window.onerror = function () {
             Module.setStatus('Exception thrown, see JavaScript console');
         };
+
+        // ---- Playback controls -------------------------------------------------
+        // Everything here drives engine cvars through the JKD_Exec bridge, so the
+        // UI stays a thin shell over the engine's own state rather than keeping a
+        // parallel copy of it.
+        (function () {
+            var exec = null, getCvar = null;
+            var controls = document.getElementById('controls');
+            var els = {
+                playPause: document.getElementById('playPause'),
+                speeds: document.getElementById('speeds'),
+                fov: document.getElementById('fov'),
+                fovVal: document.getElementById('fovVal'),
+                viewToggle: document.getElementById('viewToggle'),
+                orbitRow: document.getElementById('orbitRow'),
+                range: document.getElementById('range'),
+                rangeVal: document.getElementById('rangeVal'),
+                angle: document.getElementById('angle'),
+                angleVal: document.getElementById('angleVal'),
+                height: document.getElementById('height'),
+                heightVal: document.getElementById('heightVal')
+            };
+
+            var paused = false;
+            var thirdPerson = false;
+            var speed = 1;
+            var SPEEDS = [0.1, 0.25, 0.5, 1, 2, 4];
+
+            function setCvar(name, value) {
+                if (exec) exec(name + ' ' + value);
+            }
+
+            function setPaused(p) {
+                paused = p;
+                setCvar('cl_freezeDemo', paused ? 1 : 0);
+                els.playPause.textContent = paused ? 'Play' : 'Pause';
+                els.playPause.classList.toggle('on', paused);
+            }
+
+            function setSpeed(s) {
+                speed = s;
+                setCvar('timescale', s);
+                Array.prototype.forEach.call(els.speeds.children, function (b) {
+                    b.classList.toggle('on', parseFloat(b.dataset.speed) === s);
+                });
+            }
+
+            function setThirdPerson(on) {
+                thirdPerson = on;
+                setCvar('cg_thirdPerson', on ? 1 : 0);
+                els.viewToggle.textContent = on ? 'Third person' : 'First person';
+                els.viewToggle.classList.toggle('on', on);
+                els.orbitRow.hidden = !on;
+            }
+
+            SPEEDS.forEach(function (s) {
+                var b = document.createElement('button');
+                b.className = 'btn';
+                b.textContent = (s === 1 ? '1' : String(s)) + '×';
+                b.dataset.speed = s;
+                b.onclick = function () { setSpeed(s); };
+                els.speeds.appendChild(b);
+            });
+
+            els.playPause.onclick = function () { setPaused(!paused); };
+            els.viewToggle.onclick = function () { setThirdPerson(!thirdPerson); };
+
+            function bindRange(el, valEl, cvar, suffix) {
+                el.addEventListener('input', function () {
+                    valEl.textContent = el.value + (suffix || '');
+                    setCvar(cvar, el.value);
+                });
+            }
+            bindRange(els.fov, els.fovVal, 'cg_fov');
+            bindRange(els.range, els.rangeVal, 'cg_thirdPersonRange');
+            bindRange(els.angle, els.angleVal, 'cg_thirdPersonAngle', '°');
+            bindRange(els.height, els.heightVal, 'cg_thirdPersonVertOffset');
+
+            // Keep keystrokes aimed at the controls away from the engine, which
+            // otherwise also sees them (space would toggle pause *and* reach the
+            // game, arrow keys would nudge a slider and the view at once).
+            ['keydown', 'keyup', 'keypress'].forEach(function (t) {
+                controls.addEventListener(t, function (e) { e.stopPropagation(); });
+            });
+
+            // Space toggles pause anywhere except while a control has focus.
+            window.addEventListener('keydown', function (e) {
+                if (e.code === 'Space' && !controls.contains(document.activeElement)) {
+                    e.preventDefault();
+                    setPaused(!paused);
+                }
+            });
+
+            // Reveal on pointer activity near the bottom of the frame.
+            var hideTimer = null;
+            window.addEventListener('mousemove', function (e) {
+                var nearBottom = e.clientY > window.innerHeight - 160;
+                controls.classList.toggle('show', nearBottom);
+                clearTimeout(hideTimer);
+                if (nearBottom) {
+                    hideTimer = setTimeout(function () {
+                        if (!controls.matches(':hover, :focus-within')) controls.classList.remove('show');
+                    }, 2500);
+                }
+            });
+
+            // Wire up once the engine is actually running, then seed the controls
+            // from the engine's real cvar values instead of assuming the defaults.
+            window.JKD_ready = function () {
+                exec = Module.cwrap('JKD_Exec', null, ['string']);
+                getCvar = Module.cwrap('JKD_GetCvar', 'number', ['string']);
+
+                var fov = getCvar('cg_fov') || 80;
+                els.fov.value = fov;
+                els.fovVal.textContent = Math.round(fov);
+
+                setSpeed(1);
+                setPaused(false);
+                setThirdPerson(false);
+                controls.hidden = false;
+                controls.classList.add('show');
+                setTimeout(function () { controls.classList.remove('show'); }, 3000);
+            };
+        })();
     </script>
     {{{ SCRIPT }}}
 </body>

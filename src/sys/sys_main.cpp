@@ -100,6 +100,43 @@ void Sys_Init(void) {
 	com_maxfpsMinimized = Cvar_Get("com_maxfpsMinimized", "50", CVAR_ARCHIVE | CVAR_GLOBAL);
 }
 
+#ifdef __EMSCRIPTEN__
+/*
+================
+Playback control bridge
+
+The demo player's UI lives in the page rather than in the game, so it needs a
+way to drive the engine and read state back. Everything the controls touch
+(cl_freezeDemo, timescale, cg_fov, cg_thirdPerson*) is already a cvar, so a
+console-command bridge plus a cvar getter covers the whole surface without
+needing a bespoke export per control.
+================
+*/
+extern "C" {
+
+// Queue a console command. EXEC_APPEND rather than EXEC_NOW because this is
+// called from DOM event handlers, which can land between frames -- appending
+// keeps execution on the engine's own Cbuf pass instead of re-entering the
+// engine partway through one.
+EMSCRIPTEN_KEEPALIVE void JKD_Exec( const char *cmd ) {
+	if ( !cmd || !cmd[0] ) {
+		return;
+	}
+	Cbuf_ExecuteText( EXEC_APPEND, cmd );
+}
+
+// Read a cvar back, so the UI can initialise its controls from the engine's
+// actual values rather than assuming defaults.
+EMSCRIPTEN_KEEPALIVE float JKD_GetCvar( const char *name ) {
+	if ( !name || !name[0] ) {
+		return 0.0f;
+	}
+	return Cvar_VariableValue( name );
+}
+
+}
+#endif
+
 static void Q_NORETURN Sys_Exit(int ex) {
 	IN_Shutdown();
 #ifndef DEDICATED
@@ -283,6 +320,12 @@ int main(int argc, char* argv[]) {
 
 	// main game loop
 #ifdef __EMSCRIPTEN__
+	// Tell the page the engine is up. This can't be Module.postRun, because
+	// main() never returns here -- the loop below is driven by rAF instead.
+	// Signalling from this side also guarantees the cvars the UI reads actually
+	// exist by the time it asks for them.
+	EM_ASM({ if (window.JKD_ready) { window.JKD_ready(); } });
+
 	// A blocking while(true) loop stalls the browser's JS thread forever.
 	// Yield to the browser each frame instead, driven by requestAnimationFrame.
 	emscripten_set_main_loop(Com_Frame, 0, 1);

@@ -373,6 +373,14 @@ void CL_SystemInfoChanged( void ) {
 			gameSet = qtrue;
 		}
 
+		// timescale is CVAR_SYSTEMINFO, so replaying a demo's recorded systeminfo
+		// would reset it -- the recorded value describes the server that captured
+		// the demo, not the speed we're watching it back at. Leave it alone during
+		// playback so slow-motion/fast-forward survives configstring updates.
+		if ( clc.demoplaying && !Q_stricmp( key, "timescale" ) ) {
+			continue;
+		}
+
 		// Prevent the server from overwriting existing cVars (like graphic settings)
 		cvar_t *var = Cvar_FindVar (key);
 

@@ -475,7 +475,7 @@ set(EMS_LINK_FLAGS
     "-sFULL_ES2=1"
     "-sALLOW_MEMORY_GROWTH=1"
     "-sINITIAL_MEMORY=134217728"
-    "-sEXPORTED_RUNTIME_METHODS=['FS','run','callMain']"
+    "-sEXPORTED_RUNTIME_METHODS=['FS','run','callMain','ccall','cwrap']"
     "-sSTACK_SIZE=5MB"
     "-sASSERTIONS=1"
     "-sSTACK_OVERFLOW_CHECK=1" # this was firing for real: GL4ES writing through a NULL glstate was
