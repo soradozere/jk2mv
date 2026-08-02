@@ -59,6 +59,35 @@
             display: none;
         }
 
+        #following {
+            position: fixed;
+            top: 22px;
+            left: 0;
+            right: 0;
+            z-index: 40;
+            text-align: center;
+            pointer-events: none;
+            font-size: 22px;
+            font-weight: 600;
+            letter-spacing: .01em;
+            color: #fff;
+            text-shadow: 0 2px 10px rgba(0, 0, 0, .85);
+        }
+
+        #following[hidden] {
+            display: none;
+        }
+
+        #following .label {
+            display: block;
+            font-size: 11px;
+            font-weight: 500;
+            letter-spacing: .16em;
+            text-transform: uppercase;
+            color: rgba(255, 255, 255, .62);
+            margin-bottom: 2px;
+        }
+
         /* Playback controls. Kept out of the way until the pointer is near the
            bottom of the frame, so they don't sit over the action while watching. */
         #controls {
@@ -162,6 +191,8 @@
             font-size: 11px;
             line-height: 1.5;
             align-self: center;
+            flex: 1 1 240px;
+            min-width: 240px;
         }
 
         #controls .hint b {
@@ -180,6 +211,11 @@
 <body>
     <div id="status">Downloading...</div>
     <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+
+    <!-- Was drawn by the game's own HUD. Lives here so it can be styled as part
+         of the site, and so the engine's 2D layer keeps shrinking toward "just
+         the player HUD" for the embedded build. -->
+    <div id="following" hidden><span class="label">Following</span><span id="followName"></span></div>
 
     <div id="controls" hidden>
         <div class="row">
@@ -206,7 +242,7 @@
                 <label>Flight speed <span class="val" id="camSpeedVal">800</span></label>
                 <input type="range" id="camSpeed" min="100" max="3000" step="50" value="800">
             </div>
-            <div class="group grow hint">
+            <div class="hint grow">
                 Click the view to look around. <b>W A S D</b> flies, <b>Space</b> and <b>C</b> go up and down,
                 <b>Esc</b> releases the mouse.
             </div>
@@ -456,9 +492,33 @@
 
             // Wire up once the engine is actually running, then seed the controls
             // from the engine's real cvar values instead of assuming the defaults.
+            // Who the demo is currently watching. Composed from the engine's own
+            // state rather than mirrored, so it can't drift out of sync, and it's
+            // the same pair of exports a POV picker will read.
+            function startFollowReadout() {
+                var viewClient = Module.cwrap('JKD_GetViewClientNum', 'number', []);
+                var playerInfo = Module.cwrap('JKD_GetPlayerInfo', 'string', ['number']);
+                var followEl = document.getElementById('following');
+                var nameEl = document.getElementById('followName');
+                var last = null;
+
+                setInterval(function () {
+                    var n = viewClient();
+                    if (n < 0) { followEl.hidden = true; last = null; return; }
+                    if (n === last) return;
+                    last = n;
+                    // "n\<name>\t\<team>\..." -- strip JK2's ^n colour codes
+                    var m = /^n\\([^\\]*)/.exec(playerInfo(n) || '');
+                    var name = m ? m[1].replace(/\^./g, '') : '';
+                    nameEl.textContent = name;
+                    followEl.hidden = !name;
+                }, 250);
+            }
+
             window.JKD_ready = function () {
                 exec = Module.cwrap('JKD_Exec', null, ['string']);
                 getCvar = Module.cwrap('JKD_GetCvar', 'number', ['string']);
+                startFollowReadout();
 
                 var fov = getCvar('cg_fov') || 80;
                 els.fov.value = fov;

@@ -123,6 +123,13 @@ EMSCRIPTEN_KEEPALIVE void JKD_Exec( const char *cmd ) {
 		return;
 	}
 	Cbuf_ExecuteText( EXEC_APPEND, cmd );
+	// Cbuf_AddText appends verbatim -- it does NOT terminate the command. Two
+	// calls in one frame otherwise run together onto a single line, so
+	// "cg_thirdPerson 0" + "cg_demoCam 1" arrives as "cg_thirdPerson 0cg_demoCam 1"
+	// and the second cvar is never set at all. The first still half-works, since
+	// the value it gets ("0cg_demoCam") reads as 0 -- which is what disguised
+	// this as a bug in whatever the second command happened to be.
+	Cbuf_ExecuteText( EXEC_APPEND, "\n" );
 }
 
 // Read a cvar back, so the UI can initialise its controls from the engine's
