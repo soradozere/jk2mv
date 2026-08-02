@@ -914,8 +914,15 @@ intptr_t CL_CgameSystemCalls(intptr_t *args) {
 		return 0;
 
 	case CG_OPENUIMENU:
+#ifdef __EMSCRIPTEN__
+		// The embedded build is a demo viewer. Every menu is a route back into
+		// playing the game, so none of them are allowed to open -- see the
+		// matching guards in CL_Frame, SCR_DrawScreenField and CL_KeyEvent.
+		return 0;
+#else
 		VM_Call( uivm, UI_SET_ACTIVE_MENU, args[1] );
 		return 0;
+#endif
 
 	case CG_MEMORY_REMAINING:
 		return Hunk_MemoryRemaining();

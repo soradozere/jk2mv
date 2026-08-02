@@ -416,6 +416,14 @@ SCR_DrawScreenField
 This will be called twice if rendering in stereo mode
 ==================
 */
+#ifdef __EMSCRIPTEN__
+// Anything that isn't the demo gets painted out entirely.
+static void SCR_WasmFillBlack( void ) {
+	static const vec4_t black = { 0.0f, 0.0f, 0.0f, 1.0f };
+	SCR_FillRect( 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, black );
+}
+#endif
+
 void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 	qboolean skipBackend = (qboolean)(com_minimized->integer && !CL_VideoRecording());
 
@@ -428,22 +436,62 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 
 	// if the menu is going to cover the entire screen, we
 	// don't need to render anything under it
+#ifdef __EMSCRIPTEN__
+	// No menu ever covers the screen here, because no menu is ever drawn -- so
+	// don't let the UI module's opinion of its own fullscreen-ness skip the
+	// world underneath. Without this, a demo that fails to open leaves the main
+	// menu's splash art on screen: not clickable, since UI_SET_ACTIVE_MENU is
+	// blocked, but still plainly the game's front end.
+	if (qtrue) {
+#else
 	if (!VM_Call(uivm, UI_IS_FULLSCREEN)) {
+#endif
 		switch( cls.state ) {
 		default:
 			Com_Error( ERR_FATAL, "SCR_DrawScreenField: bad cls.state" );
 			break;
 		case CA_CINEMATIC:
+#ifdef __EMSCRIPTEN__
+			// A demo viewer never shows the game's videos. Refusing to *start*
+			// one isn't enough: the client still enters CA_CINEMATIC and draws
+			// through this path, which is why the Jedi Outcast title sequence
+			// kept playing behind a "playback ended" message.
+			SCR_WasmFillBlack();
+			break;
+#else
 			SCR_DrawCinematic();
 			break;
+#endif
 		case CA_DISCONNECTED:
 			// force menu up
 			S_StopAllSounds();
+#ifdef __EMSCRIPTEN__
+			// Paint black rather than simply drawing nothing: the engine never
+			// clears the colour buffer (r_clear defaults off, since the world
+			// normally covers it), so an empty frame leaves whatever was drawn
+			// last still on screen -- which here is the game's title art.
+			SCR_WasmFillBlack();
+#else
 			VM_Call(uivm, UI_SET_ACTIVE_MENU, UIMENU_MAIN);
+#endif
+			// ...except in the browser, where there is no menu to force up. A
+			// demo that won't open leaves a blank frame and the page reports it;
+			// falling back to the game's main menu would hand the viewer a
+			// playable client, which is the one thing that must not happen.
 			break;
 		case CA_CONNECTING:
 		case CA_CHALLENGING:
 		case CA_CONNECTED:
+#ifdef __EMSCRIPTEN__
+			// This is where the title art was actually coming from. A demo that
+			// fails to open leaves the client sitting in a connecting state, and
+			// UI_REFRESH here paints the main menu's background before the
+			// connect dialog goes on top of it -- so blocking the menu, the
+			// cinematic and the disconnected path all missed it. The page shows
+			// progress and errors, so nothing needs drawing at all.
+			SCR_WasmFillBlack();
+			break;
+#else
 			{
 				// workaround for ingame UI not loading connect.menu
 				qhandle_t hShader = re.RegisterShader("menu/art/unknownmap");
@@ -454,6 +502,7 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 			VM_Call(uivm, UI_REFRESH, cls.realtime);
 			VM_Call(uivm, UI_DRAW_CONNECT_SCREEN, qfalse);
 			break;
+#endif
 		case CA_LOADING:
 		case CA_PRIMED:
 			// draw the game information screen and loading progress
@@ -464,8 +513,14 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 			// also draw the connection information, so it doesn't
 			// flash away too briefly on local or lan games
 			// refresh to update the time
+#ifndef __EMSCRIPTEN__
 			VM_Call(uivm, UI_REFRESH, cls.realtime);
 			VM_Call(uivm, UI_DRAW_CONNECT_SCREEN, qtrue);
+#endif
+			// MV_DrawConnectingInfo above is engine-drawn and stays: it's the
+			// map/loading progress, which is worth showing. The UI module's
+			// version of the same screen is not, because it paints the menu
+			// background underneath it.
 			break;
 		case CA_ACTIVE:
 			CL_CGameRendering( stereoFrame );
@@ -475,9 +530,17 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 	}
 
 	// the menu draws next
+#ifndef __EMSCRIPTEN__
 	if ( cls.keyCatchers & KEYCATCH_UI && uivm ) {
 		VM_Call(uivm, UI_REFRESH, cls.realtime);
 	}
+#endif
+	// ...but never in the browser. The UI module still loads, because parts of
+	// the client reach into it during connect, but it is not allowed to put a
+	// single pixel on screen: the viewer must never present a front end someone
+	// could use to start playing. The connect/loading screen is drawn from the
+	// switch above and is deliberately left alone -- it reports map progress
+	// rather than offering anything to click.
 
 	// console draws next
 	Con_DrawConsole ();

@@ -27,6 +27,10 @@ cvar_t	*cl_demoSuppressChat;
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+
+// Latched so the page is told once when playback stops, not every frame.
+static qboolean	cl_wasmReportedStop = qfalse;
+
 extern "C" {
 // Current demo playback position, in server milliseconds, or -1 when no demo is
 // playing. Lets the page show/verify playback progress -- and it's the value a
@@ -2540,8 +2544,23 @@ void CL_Frame ( int msec ) {
 		&& !com_sv_running->integer ) {
 		// if disconnected, bring up the menu
 		S_StopAllSounds();
+#ifdef __EMSCRIPTEN__
+		// No menu here -- see SCR_DrawScreenField. Tell the page once per
+		// transition so it can say why playback stopped, instead of the viewer
+		// silently becoming a game client sitting on the main menu.
+		if ( !cl_wasmReportedStop ) {
+			cl_wasmReportedStop = qtrue;
+			EM_ASM( { if (window.JKD_playbackStopped) { window.JKD_playbackStopped(); } } );
+		}
+#else
 		VM_Call( uivm, UI_SET_ACTIVE_MENU, UIMENU_MAIN );
+#endif
 	}
+#ifdef __EMSCRIPTEN__
+	else if ( cls.state != CA_DISCONNECTED ) {
+		cl_wasmReportedStop = qfalse;
+	}
+#endif
 
 	// if recording an avi, lock to a fixed fps
 	if ( CL_VideoRecording() && cl_aviFrameRate->integer && msec) {

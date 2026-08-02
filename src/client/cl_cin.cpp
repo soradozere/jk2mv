@@ -1397,6 +1397,15 @@ int CIN_PlayCinematic(const char *arg, int x, int y, int w, int h, int systemBit
 	char	name[MAX_OSPATH];
 	int		i;
 
+#ifdef __EMSCRIPTEN__
+	// A demo viewer never plays the game's videos. The UI module starts the
+	// title cinematic when it goes to the main menu, so blocking the menu alone
+	// still left the Jedi Outcast intro playing behind a "playback ended"
+	// message. Refused at the source, which covers the client, cgame and UI
+	// entry points at once.
+	return -1;
+#endif
+
 	if (strstr(arg, "/") == NULL && strstr(arg, "\\") == NULL) {
 		Com_sprintf(name, sizeof(name), "video/%s", arg);
 	} else {

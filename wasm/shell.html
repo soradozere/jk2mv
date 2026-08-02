@@ -78,6 +78,10 @@
             display: none;
         }
 
+        #following .label[hidden] {
+            display: none;
+        }
+
         #following .label {
             display: block;
             font-size: 11px;
@@ -215,7 +219,7 @@
     <!-- Was drawn by the game's own HUD. Lives here so it can be styled as part
          of the site, and so the engine's 2D layer keeps shrinking toward "just
          the player HUD" for the embedded build. -->
-    <div id="following" hidden><span class="label">Following</span><span id="followName"></span></div>
+    <div id="following" hidden><span class="label" id="followLabel">Following</span><span id="followName"></span></div>
 
     <div id="controls" hidden>
         <div class="row">
@@ -287,9 +291,16 @@
         // Optional ?demo=<name> queues "+demo <name>" as a real command-line arg,
         // which Com_AddStartupCommands() runs AFTER CL_Init() registers "demo" --
         // unlike autoexec.cfg, which execs too early and hits "Unknown command".
-        var __demoParam = new URLSearchParams(location.search).get('demo');
+        var __params = new URLSearchParams(location.search);
+        var __demoParam = __params.get('demo');
+        // ?demoUrl= fetches a demo at runtime instead of taking one from the
+        // preloaded bundle. Bundling doesn't scale: a single full session runs to
+        // 400MB, which alone is larger than every game asset put together, and
+        // each new demo would mean a rebuild. Fetched demos are written straight
+        // into the VFS, so the engine finds them exactly as if they'd shipped.
+        var __demoUrl = __params.get('demoUrl');
         var Module = {
-            arguments: __demoParam ? ['+demo', __demoParam] : [],
+            arguments: (__demoParam && !__demoUrl) ? ['+demo', __demoParam] : [],
             print: function (text) {
                 if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
                 console.log(text);
@@ -499,9 +510,27 @@
                 var playerInfo = Module.cwrap('JKD_GetPlayerInfo', 'string', ['number']);
                 var followEl = document.getElementById('following');
                 var nameEl = document.getElementById('followName');
+                var labelEl = document.getElementById('followLabel');
                 var last = null;
+                var seeded = false;
 
                 setInterval(function () {
+                    // cgame comes up with the demo, not with the engine; re-apply
+                    // the camera mode the moment its cvars actually exist
+                    if (!seeded && viewClient() >= 0) {
+                        seeded = true;
+                        setCamMode(camMode);
+                    }
+                    if (camMode === 'free') {
+                        // detached: naming a player here would suggest the view is
+                        // still theirs, which is exactly the impression to avoid
+                        followEl.hidden = false;
+                        labelEl.hidden = true;
+                        nameEl.textContent = 'Free camera';
+                        last = null;
+                        return;
+                    }
+                    labelEl.hidden = false;
                     var n = viewClient();
                     if (n < 0) { followEl.hidden = true; last = null; return; }
                     if (n === last) return;
@@ -514,10 +543,54 @@
                 }, 250);
             }
 
+            // Pull a demo over HTTP and hand it to the engine through the VFS.
+            // Streamed into a single buffer rather than FS.createLazyFile, whose
+            // synchronous XHR would stall the frame loop mid-playback.
+            function loadDemoFromUrl(url) {
+                var base = decodeURIComponent(url.split('/').pop().split('?')[0]);
+                var name = base.replace(/\.dm_\d+$/i, '');
+                Module.setStatus('Fetching demo...');
+                fetch(url).then(function (r) {
+                    if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+                    var total = parseInt(r.headers.get('content-length') || '0', 10);
+                    if (!r.body) return r.arrayBuffer().then(function (b) { return new Uint8Array(b); });
+                    var reader = r.body.getReader(), chunks = [], got = 0;
+                    return (function pump() {
+                        return reader.read().then(function (res) {
+                            if (res.done) {
+                                var out = new Uint8Array(got), at = 0;
+                                chunks.forEach(function (c) { out.set(c, at); at += c.length; });
+                                return out;
+                            }
+                            chunks.push(res.value);
+                            got += res.value.length;
+                            if (total) Module.setStatus('Fetching demo... ' + Math.round(100 * got / total) + '%');
+                            return pump();
+                        });
+                    })();
+                }).then(function (bytes) {
+                    try { FS.mkdir('/base/demos'); } catch (e) { }
+                    FS.writeFile('/base/demos/' + base, bytes);
+                    Module.setStatus('');
+                    exec('demo "' + name + '"');
+                }).catch(function (e) {
+                    Module.setStatus('Could not load demo: ' + e.message);
+                    statusElement.style.display = '';
+                });
+            }
+
+            // Playback ended or a demo failed to open. There is no menu to fall
+            // back to by design, so the page has to say what happened.
+            window.JKD_playbackStopped = function () {
+                Module.setStatus('Playback ended.');
+                statusElement.style.display = '';
+            };
+
             window.JKD_ready = function () {
                 exec = Module.cwrap('JKD_Exec', null, ['string']);
                 getCvar = Module.cwrap('JKD_GetCvar', 'number', ['string']);
                 startFollowReadout();
+                if (__demoUrl) loadDemoFromUrl(__demoUrl);
 
                 var fov = getCvar('cg_fov') || 80;
                 els.fov.value = fov;
@@ -525,6 +598,11 @@
 
                 setSpeed(1);
                 setPaused(false);
+                // Camera cvars belong to cgame, which doesn't exist until a demo
+                // loads -- seeding them now just logs "Unknown command" and the
+                // UI's starting state silently never reaches the engine. Set the
+                // page's own state, and push it across once cgame is up.
+                camMode = 'first';
                 setCamMode('first');
                 controls.hidden = false;
                 controls.classList.add('show');
