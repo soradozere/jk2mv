@@ -333,6 +333,18 @@
                 if (exec) exec(name + ' ' + value);
             }
 
+            // Hand the keyboard back to the engine after a control is used. The
+            // stopPropagation guard further down is scoped to #controls, so as
+            // long as a button keeps focus every keystroke is swallowed there --
+            // which silently breaks flying the free camera the moment you click
+            // "Free fly", since the button that turned it on is still focused.
+            function releaseFocus() {
+                if (document.activeElement && controls.contains(document.activeElement)) {
+                    document.activeElement.blur();
+                }
+                canvasElement.focus();
+            }
+
             function setPaused(p) {
                 paused = p;
                 setCvar('cl_freezeDemo', paused ? 1 : 0);
@@ -348,7 +360,26 @@
                 });
             }
 
+            // Chase framing lives in cvars the engine keeps between modes, so
+            // leaving Chase and coming back to Follow would otherwise carry a
+            // 400-unit pullback and a 90 degree orbit into a view that is
+            // supposed to be the recorded one.
+            var CHASE_DEFAULTS = [
+                ['range', 'rangeVal', 'cg_thirdPersonRange', 80, ''],
+                ['angle', 'angleVal', 'cg_thirdPersonAngle', 0, '°'],
+                ['height', 'heightVal', 'cg_thirdPersonVertOffset', 0, '']
+            ];
+
+            function resetChase() {
+                CHASE_DEFAULTS.forEach(function (d) {
+                    els[d[0]].value = d[3];
+                    els[d[1]].textContent = d[3] + d[4];
+                    setCvar(d[2], d[3]);
+                });
+            }
+
             function setCamMode(mode) {
+                if (camMode === 'third' && mode !== 'third') resetChase();
                 camMode = mode;
                 setCvar('cg_thirdPerson', mode === 'third' ? 1 : 0);
                 setCvar('cg_demoCam', mode === 'free' ? 1 : 0);
@@ -364,7 +395,7 @@
                 b.className = 'btn';
                 b.textContent = (s === 1 ? '1' : String(s)) + '×';
                 b.dataset.speed = s;
-                b.onclick = function () { setSpeed(s); };
+                b.onclick = function () { setSpeed(s); releaseFocus(); };
                 els.speeds.appendChild(b);
             });
 
@@ -373,17 +404,19 @@
                 b.className = 'btn';
                 b.textContent = m.label;
                 b.dataset.mode = m.id;
-                b.onclick = function () { setCamMode(m.id); };
+                b.onclick = function () { setCamMode(m.id); releaseFocus(); };
                 els.camModes.appendChild(b);
             });
 
-            els.playPause.onclick = function () { setPaused(!paused); };
+            els.playPause.onclick = function () { setPaused(!paused); releaseFocus(); };
 
             function bindRange(el, valEl, cvar, suffix) {
                 el.addEventListener('input', function () {
                     valEl.textContent = el.value + (suffix || '');
                     setCvar(cvar, el.value);
                 });
+                // on release, not on input -- blurring mid-drag would end the drag
+                el.addEventListener('change', releaseFocus);
             }
             bindRange(els.fov, els.fovVal, 'cg_fov');
             bindRange(els.camSpeed, els.camSpeedVal, 'cg_demoCamSpeed');
