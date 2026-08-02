@@ -184,6 +184,23 @@
         .speeds {
             display: flex;
             gap: 4px;
+            flex-wrap: wrap;
+        }
+
+        /* Team colour down the leading edge, so a 5v5 picker reads at a glance
+           without turning the names themselves into low-contrast text. */
+        .btn.team1 {
+            border-left: 3px solid #e5484d;
+        }
+
+        .btn.team2 {
+            border-left: 3px solid #3b82f6;
+        }
+
+        /* Absent from the current snapshot -- selectable, but the camera will
+           hold its last known position rather than track them. */
+        .btn.unseen {
+            opacity: .45;
         }
 
         .speeds .btn {
@@ -238,6 +255,13 @@
             <div class="group">
                 <label>Camera</label>
                 <div class="speeds" id="camModes"></div>
+            </div>
+        </div>
+
+        <div class="row" id="povRow">
+            <div class="group">
+                <label>Watching</label>
+                <div class="speeds" id="povList"></div>
             </div>
         </div>
 
@@ -353,6 +377,7 @@
                 fov: document.getElementById('fov'),
                 fovVal: document.getElementById('fovVal'),
                 camModes: document.getElementById('camModes'),
+                povList: document.getElementById('povList'),
                 freeRow: document.getElementById('freeRow'),
                 camSpeed: document.getElementById('camSpeed'),
                 camSpeedVal: document.getElementById('camSpeedVal'),
@@ -502,12 +527,84 @@
 
             // Wire up once the engine is actually running, then seed the controls
             // from the engine's real cvar values instead of assuming the defaults.
+            // POV switching. The engine owns who is being watched (cg_demoFollow);
+            // the page only renders the roster and sets the cvar, so the two can't
+            // disagree about state.
+            var povFollow = -1;
+
+            function setFollow(clientNum) {
+                povFollow = clientNum;
+                setCvar('cg_demoFollow', clientNum);
+                Array.prototype.forEach.call(els.povList.children, function (b) {
+                    b.classList.toggle('on', parseInt(b.dataset.client, 10) === clientNum);
+                });
+            }
+
+            function startPovPicker() {
+                var connMask = Module.cwrap('JKD_GetConnectedMask', 'number', []);
+                var visMask = Module.cwrap('JKD_GetVisibleMask', 'number', []);
+                var playerInfo = Module.cwrap('JKD_GetPlayerInfo', 'string', ['number']);
+                var lastRoster = '';
+
+                setInterval(function () {
+                    var conn = connMask(), vis = visMask();
+                    var players = [];
+                    for (var i = 0; i < 32; i++) {
+                        if (!(conn & (1 << i))) continue;
+                        var cs = playerInfo(i) || '';
+                        var nm = /^n\\([^\\]*)/.exec(cs);
+                        var tm = /\\t\\(\d+)/.exec(cs);
+                        var team = tm ? parseInt(tm[1], 10) : -1;
+                        // team 3 is spectator -- that's the recording bot and any
+                        // idle onlookers, none of whom are worth watching
+                        if (team !== 1 && team !== 2) continue;
+                        players.push({
+                            num: i,
+                            name: nm ? nm[1].replace(/\^./g, '') : ('client ' + i),
+                            team: team,
+                            visible: !!(vis & (1 << i))
+                        });
+                    }
+
+                    // Rebuild only when the roster or visibility actually changes;
+                    // this runs 4x a second and would otherwise fight the mouse.
+                    var sig = players.map(function (p) { return p.num + p.name + p.team + (p.visible ? 1 : 0); }).join('|');
+                    if (sig === lastRoster) return;
+                    lastRoster = sig;
+
+                    els.povList.innerHTML = '';
+                    var rec = document.createElement('button');
+                    rec.className = 'btn';
+                    rec.textContent = 'Recorded view';
+                    rec.dataset.client = -1;
+                    rec.onclick = function () { setFollow(-1); releaseFocus(); };
+                    els.povList.appendChild(rec);
+
+                    players.sort(function (a, b) { return a.team - b.team || a.num - b.num; });
+                    players.forEach(function (p) {
+                        var b = document.createElement('button');
+                        b.className = 'btn team' + p.team + (p.visible ? '' : ' unseen');
+                        b.textContent = p.name;
+                        b.dataset.client = p.num;
+                        b.title = p.visible ? '' : 'Not in the demo data right now';
+                        b.onclick = function () { setFollow(p.num); releaseFocus(); };
+                        els.povList.appendChild(b);
+                    });
+
+                    Array.prototype.forEach.call(els.povList.children, function (b) {
+                        b.classList.toggle('on', parseInt(b.dataset.client, 10) === povFollow);
+                    });
+                }, 250);
+            }
+
             // Who the demo is currently watching. Composed from the engine's own
             // state rather than mirrored, so it can't drift out of sync, and it's
             // the same pair of exports a POV picker will read.
             function startFollowReadout() {
                 var viewClient = Module.cwrap('JKD_GetViewClientNum', 'number', []);
                 var playerInfo = Module.cwrap('JKD_GetPlayerInfo', 'string', ['number']);
+                var isFollowing = Module.cwrap('JKD_IsFollowing', 'number', []);
+                var visibleMask = Module.cwrap('JKD_GetVisibleMask', 'number', []);
                 var followEl = document.getElementById('following');
                 var nameEl = document.getElementById('followName');
                 var labelEl = document.getElementById('followLabel');
@@ -520,6 +617,7 @@
                     if (!seeded && viewClient() >= 0) {
                         seeded = true;
                         setCamMode(camMode);
+                        setFollow(povFollow);
                     }
                     if (camMode === 'free') {
                         // detached: naming a player here would suggest the view is
@@ -530,11 +628,23 @@
                         last = null;
                         return;
                     }
-                    labelEl.hidden = false;
-                    var n = viewClient();
+                    // Watching a chosen player wins; otherwise report whoever the
+                    // demo itself is on.
+                    var n = povFollow >= 0 ? povFollow : viewClient();
+                    // PMF_FOLLOW is how the game decides whether to say
+                    // "Following" -- a player's own demo isn't following anyone,
+                    // and labelling it that way reads as a bug.
+                    var verb = (povFollow >= 0 || isFollowing()) ? 'Watching' : 'Recorded by';
+                    // On PVS-limited demos the chosen player drops out of the data
+                    // for long stretches; say so rather than let a frozen camera
+                    // look like a bug.
+                    var lost = povFollow >= 0 && !(visibleMask() & (1 << povFollow));
+                    if (lost) verb += ' — out of view';
+                    var key = verb + ':' + n;
                     if (n < 0) { followEl.hidden = true; last = null; return; }
-                    if (n === last) return;
-                    last = n;
+                    if (key === last) return;
+                    last = key;
+                    labelEl.textContent = verb;
                     // "n\<name>\t\<team>\..." -- strip JK2's ^n colour codes
                     var m = /^n\\([^\\]*)/.exec(playerInfo(n) || '');
                     var name = m ? m[1].replace(/\^./g, '') : '';
@@ -590,6 +700,7 @@
                 exec = Module.cwrap('JKD_Exec', null, ['string']);
                 getCvar = Module.cwrap('JKD_GetCvar', 'number', ['string']);
                 startFollowReadout();
+                startPovPicker();
                 if (__demoUrl) loadDemoFromUrl(__demoUrl);
 
                 var fov = getCvar('cg_fov') || 80;

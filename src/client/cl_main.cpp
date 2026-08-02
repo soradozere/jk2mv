@@ -100,6 +100,30 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetConnectedMask( void ) {
 	return mask;
 }
 
+// Is the recording client watching someone else, or playing? PMF_FOLLOW is how
+// the game itself decides whether to say "Following" -- without it the page
+// labels a player's own demo as though they were spectating themselves.
+EMSCRIPTEN_KEEPALIVE int JKD_IsFollowing( void ) {
+	if ( !clc.demoplaying || !cl.snap.valid ) {
+		return 0;
+	}
+	return ( cl.snap.ps.pm_flags & PMF_FOLLOW ) ? 1 : 0;
+}
+
+// Which clients are in the current snapshot, as a bitmask, *including* the one
+// carried in the playerState. The POV picker needs this rather than the raw
+// snapshot mask: on older player-recorded demos most of the match is missing at
+// any moment, and offering someone the engine can't show is a dead end.
+EMSCRIPTEN_KEEPALIVE int JKD_GetVisibleMask( void ) {
+	int mask = JKD_GetSnapClientMask();
+	int view = JKD_GetViewClientNum();
+
+	if ( view >= 0 && view < MAX_CLIENTS ) {
+		mask |= 1 << view;
+	}
+	return mask;
+}
+
 // Connection state and key focus, so the page (and anyone debugging it) can see
 // what the client thinks it's doing without guessing from what's on screen.
 EMSCRIPTEN_KEEPALIVE const char *JKD_GetClientState( void ) {
