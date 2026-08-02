@@ -31,6 +31,13 @@ cvar_t	*cl_demoSuppressChat;
 // Latched so the page is told once when playback stops, not every frame.
 static qboolean	cl_wasmReportedStop = qfalse;
 
+// The last server time seen while a demo was playing, kept across the teardown
+// so the page can learn a demo's true length the first time it runs to the end.
+// Reaching the end is the only cheap way to know it: the format has no header
+// field for duration and no index, so anything else means a full parse.
+static int		cl_wasmFinalDemoTime = 0;
+static int		cl_wasmFirstDemoTime = 0;
+
 extern "C" {
 // Current demo playback position, in server milliseconds, or -1 when no demo is
 // playing. Lets the page show/verify playback progress -- and it's the value a
@@ -39,7 +46,23 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetDemoTime( void ) {
 	if ( !clc.demoplaying ) {
 		return -1;
 	}
+	if ( cl.serverTime > cl_wasmFinalDemoTime ) {
+		cl_wasmFinalDemoTime = cl.serverTime;
+	}
+	if ( !cl_wasmFirstDemoTime && cl.serverTime ) {
+		cl_wasmFirstDemoTime = cl.serverTime;
+	}
 	return cl.serverTime;
+}
+
+// How far into the demo we have ever got, in milliseconds. Once a demo has run
+// to the end this is its real length, which lets a scrubber correct a range it
+// was given wrongly -- or had to guess at.
+EMSCRIPTEN_KEEPALIVE int JKD_GetFurthestTime( void ) {
+	if ( !cl_wasmFirstDemoTime ) {
+		return 0;
+	}
+	return cl_wasmFinalDemoTime - cl_wasmFirstDemoTime;
 }
 
 // Which *player* entities the current snapshot actually carries, as a bitmask of
@@ -98,6 +121,78 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetConnectedMask( void ) {
 		}
 	}
 	return mask;
+}
+
+// Seeking. A demo is a delta-compressed stream, so there is no index to jump to
+// -- the only way to reach a moment is to replay into it. Forwards that costs
+// nothing but parsing, which is why it's done inline here rather than spread
+// over frames: no rendering, no sound, no cgame, just message decode.
+//
+// Backwards has no shortcut at all. The client state at time T is the sum of
+// every message before it, so the demo has to be restarted and replayed. That's
+// queued rather than done inline because restarting tears down and rebuilds
+// cgame, which can't happen underneath a call from the page.
+static int	cl_wasmPendingSeek = -1;
+
+static void CL_WasmSeekForward( int targetTime ) {
+	while ( cls.state == CA_ACTIVE && cl.snap.serverTime < targetTime ) {
+		int before = cl.snap.serverTime;
+
+		CL_ReadDemoMessage();
+		if ( cl.snap.serverTime == before ) {
+			break;		// end of demo, or a stream that isn't advancing
+		}
+	}
+
+	if ( cls.state == CA_ACTIVE ) {
+		// Drop the reliable-command backlog. Thousands of chat lines and score
+		// updates accumulated during the replay, and the ring only holds the
+		// last handful -- cgame asking for one that has been cycled out is a
+		// fatal error. Everything before the seek target is history anyway.
+		clc.lastExecutedServerCommand = clc.serverCommandSequence;
+
+		// Re-anchor playback: cl.serverTime is derived from realtime plus this
+		// delta every frame, so without it the demo would snap straight back.
+		cl.serverTime = cl.snap.serverTime;
+		cl.serverTimeDelta = cl.snap.serverTime - cls.realtime;
+		cl.oldFrameServerTime = cl.snap.serverTime;
+		cl.oldServerTime = cl.snap.serverTime;
+	}
+
+	// Sounds are started by cgame from entity events, and cgame doesn't run
+	// during the pump above -- so nothing fires as we skim past thousands of
+	// snapshots. This just clears anything already in flight when the seek began,
+	// so a saber hum from the old position doesn't survive the jump.
+	S_StopAllSounds();
+}
+
+// Called once playback is live again after a restart, to finish a backward seek.
+void CL_WasmCheckPendingSeek( void ) {
+	if ( cl_wasmPendingSeek < 0 || cls.state != CA_ACTIVE || !cl.snap.valid ) {
+		return;
+	}
+	CL_WasmSeekForward( cl_wasmPendingSeek );
+	cl_wasmPendingSeek = -1;
+	EM_ASM( { if (window.JKD_seekDone) { window.JKD_seekDone(); } } );
+}
+
+// Seek to a server time in milliseconds. Returns where playback actually landed,
+// or -1 if the seek was deferred (backwards) or impossible.
+EMSCRIPTEN_KEEPALIVE int JKD_SeekTo( int targetTime ) {
+	if ( !clc.demoplaying || !clc.demofile ) {
+		return -1;
+	}
+
+	if ( targetTime <= cl.snap.serverTime ) {
+		// Backwards: restart and replay. Queued through the command buffer so
+		// the teardown happens between frames rather than under this call.
+		cl_wasmPendingSeek = targetTime;
+		Cbuf_ExecuteText( EXEC_APPEND, va( "demo \"%s\"\n", clc.demoName ) );
+		return -1;
+	}
+
+	CL_WasmSeekForward( targetTime );
+	return cl.snap.serverTime;
 }
 
 // Is the recording client watching someone else, or playing? PMF_FOLLOW is how
@@ -2584,7 +2679,11 @@ void CL_Frame ( int msec ) {
 		// silently becoming a game client sitting on the main menu.
 		if ( !cl_wasmReportedStop ) {
 			cl_wasmReportedStop = qtrue;
-			EM_ASM( { if (window.JKD_playbackStopped) { window.JKD_playbackStopped(); } } );
+			// Hand back the length we now know for certain, so a scrubber that
+			// was working from a guess can correct itself.
+			EM_ASM( {
+				if (window.JKD_playbackStopped) { window.JKD_playbackStopped($0); }
+			}, cl_wasmFirstDemoTime ? cl_wasmFinalDemoTime - cl_wasmFirstDemoTime : 0 );
 		}
 #else
 		VM_Call( uivm, UI_SET_ACTIVE_MENU, UIMENU_MAIN );
@@ -2593,6 +2692,8 @@ void CL_Frame ( int msec ) {
 #ifdef __EMSCRIPTEN__
 	else if ( cls.state != CA_DISCONNECTED ) {
 		cl_wasmReportedStop = qfalse;
+		// a backward seek restarted the demo; finish it now playback is live
+		CL_WasmCheckPendingSeek();
 	}
 #endif
 

@@ -207,6 +207,18 @@
             padding: 6px 9px;
         }
 
+        #controls .time {
+            color: #93a1b5;
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+            min-width: 52px;
+            text-align: center;
+        }
+
+        #timelineRow input[type=range] {
+            flex: 1 1 auto;
+        }
+
         #controls .hint {
             color: #7d8b9e;
             font-size: 11px;
@@ -239,6 +251,12 @@
     <div id="following" hidden><span class="label" id="followLabel">Following</span><span id="followName"></span></div>
 
     <div id="controls" hidden>
+        <div class="row" id="timelineRow">
+            <span class="time" id="timeNow">0:00</span>
+            <input type="range" id="timeline" class="grow" min="0" max="1000" step="1" value="0">
+            <span class="time" id="timeTotal">0:00</span>
+        </div>
+
         <div class="row">
             <button id="playPause" class="btn wide" title="Play / pause (Space)">Pause</button>
 
@@ -378,6 +396,9 @@
                 fovVal: document.getElementById('fovVal'),
                 camModes: document.getElementById('camModes'),
                 povList: document.getElementById('povList'),
+                timeline: document.getElementById('timeline'),
+                timeNow: document.getElementById('timeNow'),
+                timeTotal: document.getElementById('timeTotal'),
                 freeRow: document.getElementById('freeRow'),
                 camSpeed: document.getElementById('camSpeed'),
                 camSpeedVal: document.getElementById('camSpeedVal'),
@@ -527,6 +548,70 @@
 
             // Wire up once the engine is actually running, then seed the controls
             // from the engine's real cvar values instead of assuming the defaults.
+            // Scrubbing. Demo times are absolute server milliseconds, so the page
+            // works in elapsed time from whatever the first frame reported.
+            //
+            // ?duration= is how Soracle will drive this: the library knows each
+            // demo's length from ingest, and asking the viewer to find it means a
+            // full parse at load. Without it the scrubber still works -- the range
+            // simply grows to the furthest point reached.
+            function startTimeline() {
+                var demoTime = Module.cwrap('JKD_GetDemoTime', 'number', []);
+                var seekTo = Module.cwrap('JKD_SeekTo', 'number', ['number']);
+                var furthestTime = Module.cwrap('JKD_GetFurthestTime', 'number', []);
+                var declared = parseFloat(__params.get('duration') || '0') * 1000;
+                var origin = null, furthest = 0, dragging = false, seeking = false;
+
+                // The engine reports the real length once a demo has run to the
+                // end. Trust that over anything we were told: seeking past the
+                // end stops playback, so an over-stated duration is not a
+                // cosmetic problem.
+                window.JKD_playbackEnded = function (realDuration) {
+                    if (realDuration > 0) { declared = realDuration; furthest = realDuration; }
+                };
+
+                function fmt(ms) {
+                    var s = Math.max(0, Math.round(ms / 1000));
+                    var m = Math.floor(s / 60);
+                    if (m < 60) return m + ':' + String(s % 60).padStart(2, '0');
+                    return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+                }
+                function span() { return Math.max(declared, furthest, 1000); }
+
+                window.JKD_seekDone = function () { seeking = false; };
+
+                els.timeline.addEventListener('pointerdown', function () { dragging = true; });
+                els.timeline.addEventListener('input', function () {
+                    els.timeNow.textContent = fmt(els.timeline.value / 1000 * span());
+                });
+                els.timeline.addEventListener('change', function () {
+                    dragging = false;
+                    if (origin === null) return;
+                    seeking = true;
+                    var target = origin + (els.timeline.value / 1000) * span();
+                    // a backward seek restarts the demo and finishes asynchronously,
+                    // which is why the flag is cleared by JKD_seekDone rather than here
+                    if (seekTo(Math.round(target)) >= 0) seeking = false;
+                    releaseFocus();
+                });
+
+                setInterval(function () {
+                    var t = demoTime();
+                    if (t < 0) return;
+                    if (origin === null) origin = t;
+                    var elapsed = t - origin;
+                    if (elapsed > furthest) furthest = elapsed;
+                    // seeking explores ahead of playback, so take the engine's
+                    // high-water mark too rather than only what we've watched
+                    var seen = furthestTime();
+                    if (seen > furthest) furthest = seen;
+                    els.timeTotal.textContent = fmt(span());
+                    if (dragging || seeking) return;
+                    els.timeNow.textContent = fmt(elapsed);
+                    els.timeline.value = Math.round(1000 * elapsed / span());
+                }, 200);
+            }
+
             // POV switching. The engine owns who is being watched (cg_demoFollow);
             // the page only renders the roster and sets the cvar, so the two can't
             // disagree about state.
@@ -691,9 +776,10 @@
 
             // Playback ended or a demo failed to open. There is no menu to fall
             // back to by design, so the page has to say what happened.
-            window.JKD_playbackStopped = function () {
+            window.JKD_playbackStopped = function (realDuration) {
                 Module.setStatus('Playback ended.');
                 statusElement.style.display = '';
+                if (window.JKD_playbackEnded) window.JKD_playbackEnded(realDuration);
             };
 
             window.JKD_ready = function () {
@@ -701,6 +787,7 @@
                 getCvar = Module.cwrap('JKD_GetCvar', 'number', ['string']);
                 startFollowReadout();
                 startPovPicker();
+                startTimeline();
                 if (__demoUrl) loadDemoFromUrl(__demoUrl);
 
                 var fov = getCvar('cg_fov') || 80;
