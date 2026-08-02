@@ -1903,6 +1903,20 @@ void CL_KeyEvent (int key, qboolean down, int time) {
 		return;
 	}
 
+#ifdef __EMSCRIPTEN__
+	// The embedded build is a demo viewer, not a copy of the game. Escape opens
+	// the in-game menu, which is a live route into Join / Add Bot / Setup, and
+	// the console is a route into everything else; neither belongs on a public
+	// page. Swallowed here rather than hidden behind a cvar so there is nothing
+	// to switch back on. Alt+Enter above is left alone -- it only toggles
+	// fullscreen, and r_fullscreen is already forced off for the canvas.
+	// Note the browser still releases pointer lock on escape by itself, which is
+	// the only escape behaviour a viewer actually needs.
+	if ( clc.demoplaying && ( key == A_ESCAPE || key == A_CONSOLE ) ) {
+		return;
+	}
+#endif
+
 	// console key is hardcoded, so the user can never unbind it
 	if (key == A_CONSOLE) {
 		if (!down) {
