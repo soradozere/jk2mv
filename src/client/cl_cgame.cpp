@@ -1373,6 +1373,15 @@ void CL_InitCGame( void ) {
 	Com_sprintf( cl.mapname, sizeof( cl.mapname ), "maps/%s.bsp", mapname );
 
 	// load the dll or bytecode
+#ifdef __EMSCRIPTEN__
+	// Always take the statically linked cgame. vm_cgame defaults to 2
+	// (VMI_COMPILED), and a demo recorded on a pure server also forces QVM
+	// below -- either way the engine would silently run vm/cgame.qvm out of the
+	// assets instead of our own code, and every cgame-side playback feature
+	// (free camera, POV switching) would be dead code. There is no QVM JIT
+	// under wasm anyway, so the interpreter is the slower option too.
+	interpret = VMI_NATIVE;
+#else
 	if ( cl_connectedToPureServer != 0 ) {
 		// if sv_pure is set we only allow qvms to be loaded
 		interpret = VMI_COMPILED;
@@ -1380,6 +1389,7 @@ void CL_InitCGame( void ) {
 	else {
 		interpret = (vmInterpret_t)(int)Cvar_VariableValue( "vm_cgame" );
 	}
+#endif
 	cgvm = VM_Create( "cgame", qfalse, CL_CgameSystemCalls, interpret );
 	if ( !cgvm ) {
 		Com_Error( ERR_DROP, "VM_Create on cgame failed" );

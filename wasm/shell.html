@@ -157,6 +157,18 @@
             padding: 6px 9px;
         }
 
+        #controls .hint {
+            color: #7d8b9e;
+            font-size: 11px;
+            line-height: 1.5;
+            align-self: center;
+        }
+
+        #controls .hint b {
+            color: #b9c6d6;
+            font-weight: 600;
+        }
+
         #controls input[type=range] {
             width: 100%;
             accent-color: #2f81f7;
@@ -184,8 +196,19 @@
             </div>
 
             <div class="group">
-                <label>View</label>
-                <button id="viewToggle" class="btn">First person</button>
+                <label>Camera</label>
+                <div class="speeds" id="camModes"></div>
+            </div>
+        </div>
+
+        <div class="row" id="freeRow" hidden>
+            <div class="group grow">
+                <label>Flight speed <span class="val" id="camSpeedVal">800</span></label>
+                <input type="range" id="camSpeed" min="100" max="3000" step="50" value="800">
+            </div>
+            <div class="group grow hint">
+                Click the view to look around. <b>W A S D</b> flies, <b>Space</b> and <b>C</b> go up and down,
+                <b>Esc</b> releases the mouse.
             </div>
         </div>
 
@@ -283,7 +306,10 @@
                 speeds: document.getElementById('speeds'),
                 fov: document.getElementById('fov'),
                 fovVal: document.getElementById('fovVal'),
-                viewToggle: document.getElementById('viewToggle'),
+                camModes: document.getElementById('camModes'),
+                freeRow: document.getElementById('freeRow'),
+                camSpeed: document.getElementById('camSpeed'),
+                camSpeedVal: document.getElementById('camSpeedVal'),
                 orbitRow: document.getElementById('orbitRow'),
                 range: document.getElementById('range'),
                 rangeVal: document.getElementById('rangeVal'),
@@ -294,9 +320,14 @@
             };
 
             var paused = false;
-            var thirdPerson = false;
+            var camMode = 'first';
             var speed = 1;
             var SPEEDS = [0.1, 0.25, 0.5, 1, 2, 4];
+            var CAM_MODES = [
+                { id: 'first', label: 'Follow' },
+                { id: 'third', label: 'Chase' },
+                { id: 'free', label: 'Free fly' }
+            ];
 
             function setCvar(name, value) {
                 if (exec) exec(name + ' ' + value);
@@ -317,12 +348,15 @@
                 });
             }
 
-            function setThirdPerson(on) {
-                thirdPerson = on;
-                setCvar('cg_thirdPerson', on ? 1 : 0);
-                els.viewToggle.textContent = on ? 'Third person' : 'First person';
-                els.viewToggle.classList.toggle('on', on);
-                els.orbitRow.hidden = !on;
+            function setCamMode(mode) {
+                camMode = mode;
+                setCvar('cg_thirdPerson', mode === 'third' ? 1 : 0);
+                setCvar('cg_demoCam', mode === 'free' ? 1 : 0);
+                els.orbitRow.hidden = mode !== 'third';
+                els.freeRow.hidden = mode !== 'free';
+                Array.prototype.forEach.call(els.camModes.children, function (b) {
+                    b.classList.toggle('on', b.dataset.mode === mode);
+                });
             }
 
             SPEEDS.forEach(function (s) {
@@ -334,8 +368,16 @@
                 els.speeds.appendChild(b);
             });
 
+            CAM_MODES.forEach(function (m) {
+                var b = document.createElement('button');
+                b.className = 'btn';
+                b.textContent = m.label;
+                b.dataset.mode = m.id;
+                b.onclick = function () { setCamMode(m.id); };
+                els.camModes.appendChild(b);
+            });
+
             els.playPause.onclick = function () { setPaused(!paused); };
-            els.viewToggle.onclick = function () { setThirdPerson(!thirdPerson); };
 
             function bindRange(el, valEl, cvar, suffix) {
                 el.addEventListener('input', function () {
@@ -344,6 +386,7 @@
                 });
             }
             bindRange(els.fov, els.fovVal, 'cg_fov');
+            bindRange(els.camSpeed, els.camSpeedVal, 'cg_demoCamSpeed');
             bindRange(els.range, els.rangeVal, 'cg_thirdPersonRange');
             bindRange(els.angle, els.angleVal, 'cg_thirdPersonAngle', '°');
             bindRange(els.height, els.heightVal, 'cg_thirdPersonVertOffset');
@@ -355,9 +398,11 @@
                 controls.addEventListener(t, function (e) { e.stopPropagation(); });
             });
 
-            // Space toggles pause anywhere except while a control has focus.
+            // Space toggles pause anywhere except while a control has focus -- and
+            // except in free-fly, where Space is the camera's "up" and has to reach
+            // the engine untouched.
             window.addEventListener('keydown', function (e) {
-                if (e.code === 'Space' && !controls.contains(document.activeElement)) {
+                if (e.code === 'Space' && camMode !== 'free' && !controls.contains(document.activeElement)) {
                     e.preventDefault();
                     setPaused(!paused);
                 }
@@ -388,7 +433,7 @@
 
                 setSpeed(1);
                 setPaused(false);
-                setThirdPerson(false);
+                setCamMode('first');
                 controls.hidden = false;
                 controls.classList.add('show');
                 setTimeout(function () { controls.classList.remove('show'); }, 3000);

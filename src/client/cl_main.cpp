@@ -37,6 +37,79 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetDemoTime( void ) {
 	}
 	return cl.serverTime;
 }
+
+// Which *player* entities the current snapshot actually carries, as a bitmask of
+// client numbers. Demos only contain what the server sent the recording client,
+// which is PVS-culled, so this is the measurement that decides how far a free
+// camera or POV switching can go: if it tracks the connected mask, we have the
+// whole match; if it drops as players separate, we only ever have the
+// recorder's view. Doubles as the data source for a POV picker, which can only
+// offer players the snapshot actually contains.
+EMSCRIPTEN_KEEPALIVE int JKD_GetSnapClientMask( void ) {
+	int i, mask = 0;
+
+	if ( !clc.demoplaying || !cl.snap.valid ) {
+		return 0;
+	}
+	for ( i = 0; i < cl.snap.numEntities; i++ ) {
+		const entityState_t *es = &cl.parseEntities[ (cl.snap.parseEntitiesNum + i) & (MAX_PARSE_ENTITIES - 1) ];
+		if ( es->number >= 0 && es->number < MAX_CLIENTS ) {
+			mask |= 1 << es->number;
+		}
+	}
+	return mask;
+}
+
+EMSCRIPTEN_KEEPALIVE int JKD_GetSnapEntityCount( void ) {
+	if ( !clc.demoplaying || !cl.snap.valid ) {
+		return -1;
+	}
+	return cl.snap.numEntities;
+}
+
+// The client we're currently viewing through. Its entity is carried in the
+// playerState rather than the entity list, so it is deliberately absent from
+// JKD_GetSnapClientMask and has to be added back when counting coverage.
+EMSCRIPTEN_KEEPALIVE int JKD_GetViewClientNum( void ) {
+	if ( !clc.demoplaying || !cl.snap.valid ) {
+		return -1;
+	}
+	return cl.snap.ps.clientNum;
+}
+
+// Clients with a configstring set -- i.e. who was actually in the match,
+// independent of what's currently visible.
+EMSCRIPTEN_KEEPALIVE int JKD_GetConnectedMask( void ) {
+	int i, mask = 0;
+
+	if ( !clc.demoplaying ) {
+		return 0;
+	}
+	for ( i = 0; i < MAX_CLIENTS; i++ ) {
+		const char *cs = cl.gameState.stringOffsets[ CS_PLAYERS + i ]
+			? cl.gameState.stringData + cl.gameState.stringOffsets[ CS_PLAYERS + i ]
+			: NULL;
+		if ( cs && cs[0] ) {
+			mask |= 1 << i;
+		}
+	}
+	return mask;
+}
+
+// Raw CS_PLAYERS configstring for a client ("n\name\t\team\..."), or "" if that
+// slot is empty. The page parses it rather than the engine, so adding a field to
+// the POV picker later doesn't mean another export and another rebuild.
+EMSCRIPTEN_KEEPALIVE const char *JKD_GetPlayerInfo( int clientNum ) {
+	const char *cs;
+
+	if ( !clc.demoplaying || clientNum < 0 || clientNum >= MAX_CLIENTS ) {
+		return "";
+	}
+	cs = cl.gameState.stringOffsets[ CS_PLAYERS + clientNum ]
+		? cl.gameState.stringData + cl.gameState.stringOffsets[ CS_PLAYERS + clientNum ]
+		: NULL;
+	return cs ? cs : "";
+}
 }
 #endif
 
