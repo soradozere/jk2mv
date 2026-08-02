@@ -872,6 +872,18 @@ void Con_DrawConsole( void ) {
 	// check for console width changes from a vid mode change
 	Con_CheckResize ();
 
+#ifdef __EMSCRIPTEN__
+	// The console is never drawn in the viewer. Worth spelling out why, because
+	// it is genuinely counter-intuitive: when the client is disconnected and
+	// nothing else holds the keys, Q3 renders the console *full screen* as a
+	// backdrop -- and JK2's console background is the Jedi Outcast title art.
+	// That, not any menu, is what kept reappearing whenever a demo failed to
+	// open, which is why blocking UI_SET_ACTIVE_MENU, UI_REFRESH, cinematics and
+	// even clearing the colour buffer every frame all failed to shift it. The
+	// console key is already swallowed in CL_KeyEvent; this stops it drawing too.
+	return;
+#endif
+
 	// if disconnected, render console full screen
 	if ( cls.state == CA_DISCONNECTED ) {
 		if ( !( cls.keyCatchers & (KEYCATCH_UI | KEYCATCH_CGAME)) ) {

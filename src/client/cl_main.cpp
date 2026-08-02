@@ -100,6 +100,16 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetConnectedMask( void ) {
 	return mask;
 }
 
+// Connection state and key focus, so the page (and anyone debugging it) can see
+// what the client thinks it's doing without guessing from what's on screen.
+EMSCRIPTEN_KEEPALIVE const char *JKD_GetClientState( void ) {
+	static char buf[128];
+
+	Com_sprintf( buf, sizeof( buf ), "state %i catchers %i demoplaying %i uivm %i",
+		(int)cls.state, cls.keyCatchers, (int)clc.demoplaying, uivm ? 1 : 0 );
+	return buf;
+}
+
 // Raw CS_PLAYERS configstring for a client ("n\name\t\team\..."), or "" if that
 // slot is empty. The page parses it rather than the engine, so adding a field to
 // the POV picker later doesn't mean another export and another rebuild.

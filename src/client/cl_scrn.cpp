@@ -416,14 +416,6 @@ SCR_DrawScreenField
 This will be called twice if rendering in stereo mode
 ==================
 */
-#ifdef __EMSCRIPTEN__
-// Anything that isn't the demo gets painted out entirely.
-static void SCR_WasmFillBlack( void ) {
-	static const vec4_t black = { 0.0f, 0.0f, 0.0f, 1.0f };
-	SCR_FillRect( 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, black );
-}
-#endif
-
 void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 	qboolean skipBackend = (qboolean)(com_minimized->integer && !CL_VideoRecording());
 
@@ -456,7 +448,7 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 			// one isn't enough: the client still enters CA_CINEMATIC and draws
 			// through this path, which is why the Jedi Outcast title sequence
 			// kept playing behind a "playback ended" message.
-			SCR_WasmFillBlack();
+			// nothing to draw; r_clear leaves the frame black
 			break;
 #else
 			SCR_DrawCinematic();
@@ -470,7 +462,7 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 			// clears the colour buffer (r_clear defaults off, since the world
 			// normally covers it), so an empty frame leaves whatever was drawn
 			// last still on screen -- which here is the game's title art.
-			SCR_WasmFillBlack();
+			// nothing to draw; r_clear leaves the frame black
 #else
 			VM_Call(uivm, UI_SET_ACTIVE_MENU, UIMENU_MAIN);
 #endif
@@ -489,7 +481,7 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 			// connect dialog goes on top of it -- so blocking the menu, the
 			// cinematic and the disconnected path all missed it. The page shows
 			// progress and errors, so nothing needs drawing at all.
-			SCR_WasmFillBlack();
+			// nothing to draw; r_clear leaves the frame black
 			break;
 #else
 			{

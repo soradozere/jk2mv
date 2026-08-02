@@ -1250,7 +1250,17 @@ void R_Register( void )
 	r_showtris = ri.Cvar_Get ("r_showtris", "0", CVAR_CHEAT);
 	r_showsky = ri.Cvar_Get ("r_showsky", "0", CVAR_CHEAT);
 	r_shownormals = ri.Cvar_Get ("r_shownormals", "0", CVAR_CHEAT);
+#ifdef __EMSCRIPTEN__
+	// 8 is black. The engine normally leaves the colour buffer alone, because the
+	// world covers it -- which means a frame that draws nothing shows the
+	// previous one instead. That is why a demo failing to open kept the game's
+	// title art on screen no matter how many draw paths were blocked. Clearing
+	// every frame makes "draw nothing" genuinely mean a black frame, across the
+	// whole framebuffer rather than the 4:3 region a 640x480 fill can reach.
+	r_clear = ri.Cvar_Get ("r_clear", "8", 0);
+#else
 	r_clear = ri.Cvar_Get ("r_clear", "0", 0);
+#endif
 	r_offsetFactor = ri.Cvar_Get( "r_offsetfactor", "-1", CVAR_CHEAT );
 	r_offsetUnits = ri.Cvar_Get( "r_offsetunits", "-2", CVAR_CHEAT );
 	r_drawBuffer = ri.Cvar_Get( "r_drawBuffer", "GL_BACK", CVAR_CHEAT );
