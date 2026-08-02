@@ -38,21 +38,104 @@ static qboolean	cl_wasmReportedStop = qfalse;
 static int		cl_wasmFinalDemoTime = 0;
 static int		cl_wasmFirstDemoTime = 0;
 
+// Records consumed so far, and how many the file holds in total. Together these
+// give a usable duration without parsing the whole demo -- see
+// JKD_GetEstimatedDuration.
+int				cl_wasmRecordsRead = 0;
+static int		cl_wasmTotalRecords = -1;
+// Records already consumed when the first snapshot landed. Everything before it
+// -- the gamestate and the configstrings -- carries no time, and counting those
+// against the elapsed clock is what makes an early rate estimate too slow.
+static int		cl_wasmFirstRecordIndex = -1;
+
+/*
+Count the records in the demo without decoding any of them.
+
+A demo is a flat run of [4-byte sequence][4-byte length][length bytes], so the
+count can be had by hopping header to header -- no delta decompression, no
+entity parsing, no cgame. That matters because the format carries no duration
+field and no index, and the honest alternative is a full parse: about twelve
+seconds for a seven-hour recording, which is far too long to spend before the
+first frame.
+
+Opens its own handle so playback's file position is untouched.
+*/
+static int CL_WasmCountDemoRecords( void ) {
+	fileHandle_t	f = 0;
+	char			name[MAX_OSPATH];
+	int				seq, len, count = 0;
+
+	if ( !clc.demoName[0] ) {
+		return -1;
+	}
+	Com_sprintf( name, sizeof( name ), "demos/%s.dm_15", clc.demoName );
+	FS_FOpenFileRead( name, &f, qtrue );
+	if ( !f ) {
+		Com_sprintf( name, sizeof( name ), "demos/%s.dm_16", clc.demoName );
+		FS_FOpenFileRead( name, &f, qtrue );
+		if ( !f ) {
+			Com_sprintf( name, sizeof( name ), "demos/%s", clc.demoName );
+			FS_FOpenFileRead( name, &f, qtrue );
+			if ( !f ) {
+				return -1;
+			}
+		}
+	}
+
+	while ( 1 ) {
+		if ( FS_Read( &seq, 4, f ) != 4 ) {
+			break;
+		}
+		if ( FS_Read( &len, 4, f ) != 4 ) {
+			break;
+		}
+		len = LittleLong( len );
+		if ( len < 0 || len > MAX_MSGLEN ) {
+			break;			// -1 marks the end; anything else here is corruption
+		}
+		if ( FS_Seek( f, len, FS_SEEK_CUR ) < 0 ) {
+			break;
+		}
+		count++;
+	}
+
+	FS_FCloseFile( f );
+	return count;
+}
+
 extern "C" {
 // Current demo playback position, in server milliseconds, or -1 when no demo is
 // playing. Lets the page show/verify playback progress -- and it's the value a
 // timeline scrubber will need to drive.
 EMSCRIPTEN_KEEPALIVE int JKD_GetDemoTime( void ) {
-	if ( !clc.demoplaying ) {
+	// cl.snap.valid, not just demoplaying: clc.demoplaying is set the moment the
+	// file opens, while cl.serverTime stays 0 until the first snapshot is parsed.
+	// Reporting that zero as a position is how a caller ends up treating the
+	// start of the demo as time zero and every later timestamp as elapsed --
+	// invisible on a demo that loads quickly, glaring on one that doesn't.
+	if ( !clc.demoplaying || !cl.snap.valid || !cl.serverTime ) {
 		return -1;
 	}
 	if ( cl.serverTime > cl_wasmFinalDemoTime ) {
 		cl_wasmFinalDemoTime = cl.serverTime;
 	}
-	if ( !cl_wasmFirstDemoTime && cl.serverTime ) {
+	if ( !cl_wasmFirstDemoTime ) {
 		cl_wasmFirstDemoTime = cl.serverTime;
 	}
 	return cl.serverTime;
+}
+
+// Position within the demo, in milliseconds from its first frame. Server times
+// are absolute and start wherever the server happened to be up to, so this is
+// the only figure a timeline can use directly -- and working it out here means
+// callers can't get the origin wrong.
+EMSCRIPTEN_KEEPALIVE int JKD_GetElapsedTime( void ) {
+	int now = JKD_GetDemoTime();
+
+	if ( now < 0 || !cl_wasmFirstDemoTime ) {
+		return -1;
+	}
+	return now - cl_wasmFirstDemoTime;
 }
 
 // How far into the demo we have ever got, in milliseconds. Once a demo has run
@@ -63,6 +146,49 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetFurthestTime( void ) {
 		return 0;
 	}
 	return cl_wasmFinalDemoTime - cl_wasmFirstDemoTime;
+}
+
+// Estimated total length in milliseconds, from the ratio of records consumed to
+// records in the file. A scrubber needs a range from the first frame, and this
+// gives one for the cost of a header walk instead of a full parse. The estimate
+// sharpens as playback proceeds, and is replaced by the exact value the moment
+// the demo runs to its end.
+EMSCRIPTEN_KEEPALIVE int JKD_GetEstimatedDuration( void ) {
+	int elapsed;
+
+	if ( cl_wasmTotalRecords < 0 ) {
+		cl_wasmTotalRecords = CL_WasmCountDemoRecords();
+	}
+	if ( cl_wasmTotalRecords <= 0 ) {
+		return 0;
+	}
+	elapsed = cl_wasmFinalDemoTime - cl_wasmFirstDemoTime;
+	if ( cl_wasmRecordsRead >= cl_wasmTotalRecords && elapsed > 0 ) {
+		return elapsed;		// the whole file has been read: this is exact
+	}
+
+	// Measure the snapshot interval rather than assume one. Counting only the
+	// records since the first snapshot keeps the timeless startup records out of
+	// the average, which is what let a usable rate emerge from a second or two of
+	// play instead of needing thousands of records. Assuming a rate would have
+	// been wrong here anyway: 20Hz is the common JK2 setting, but the 2018 demo
+	// in hand runs at 30.
+	{
+		int sampled = cl_wasmRecordsRead - cl_wasmFirstRecordIndex;
+		// Measured against the *current* position, not the furthest ever reached:
+		// a backward seek restarts the file, so the record count goes back to the
+		// beginning while the high-water mark stays where it was, and pairing the
+		// two would put the rate out by the size of the jump.
+		int span = ( clc.demoplaying && cl.snap.valid )
+			? cl.serverTime - cl_wasmFirstDemoTime : 0;
+
+		if ( cl_wasmFirstRecordIndex >= 0 && sampled >= 20 && span > 0 ) {
+			double perRecord = (double)span / (double)sampled;
+			return (int)( perRecord * (double)( cl_wasmTotalRecords - cl_wasmFirstRecordIndex ) );
+		}
+	}
+	// nothing sampled yet -- 20Hz is the usual JK2 rate and beats no range at all
+	return cl_wasmTotalRecords * 50;
 }
 
 // Which *player* entities the current snapshot actually carries, as a bitmask of
@@ -135,9 +261,21 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetConnectedMask( void ) {
 static int	cl_wasmPendingSeek = -1;
 
 static void CL_WasmSeekForward( int targetTime ) {
+	// Reading past the last record ends playback outright, so a seek must never
+	// be allowed to reach it. Any timeline range is a guess until a demo has run
+	// through once -- the format states no duration -- so dragging to the end of
+	// the bar would otherwise stop the demo rather than take you to its end.
+	// The record count is exact even when the duration derived from it isn't.
+	if ( cl_wasmTotalRecords < 0 ) {
+		cl_wasmTotalRecords = CL_WasmCountDemoRecords();
+	}
+
 	while ( cls.state == CA_ACTIVE && cl.snap.serverTime < targetTime ) {
 		int before = cl.snap.serverTime;
 
+		if ( cl_wasmTotalRecords > 0 && cl_wasmRecordsRead >= cl_wasmTotalRecords - 1 ) {
+			break;		// hold on the final frame rather than falling off the end
+		}
 		CL_ReadDemoMessage();
 		if ( cl.snap.serverTime == before ) {
 			break;		// end of demo, or a stream that isn't advancing
@@ -764,7 +902,27 @@ void CL_ReadDemoMessage( void ) {
 
 	clc.lastPacketTime = cls.realtime;
 	buf.readcount = 0;
+#ifdef __EMSCRIPTEN__
+	// counted so a duration can be estimated from the ratio of records consumed
+	// to records in the file, without parsing the whole thing up front
+	cl_wasmRecordsRead++;
+#endif
 	CL_ParseServerMessage( &buf );
+
+#ifdef __EMSCRIPTEN__
+	// Take the rate baseline here, at the record the first snapshot arrives on,
+	// rather than lazily when something asks for it. A seek replays thousands of
+	// records inside a single frame, so a lazy baseline would be captured
+	// somewhere in the middle of that replay -- leaving a long elapsed time
+	// divided by a handful of records, and a duration estimate several times too
+	// large.
+	if ( cl_wasmFirstRecordIndex < 0 && clc.demoplaying && cl.snap.valid && cl.snap.serverTime ) {
+		cl_wasmFirstRecordIndex = cl_wasmRecordsRead;
+		if ( !cl_wasmFirstDemoTime ) {
+			cl_wasmFirstDemoTime = cl.snap.serverTime;
+		}
+	}
+#endif
 }
 
 /*
@@ -847,6 +1005,15 @@ void CL_PlayDemo_f( void ) {
 		}
 	}
 	Q_strncpyz( clc.demoName, arg, sizeof( clc.demoName ) );
+
+#ifdef __EMSCRIPTEN__
+	// Reading restarts from the top, so the consumed count has to as well or the
+	// duration estimate drifts. The times either side of it are absolute server
+	// times and identical across restarts of the same demo, so the high-water
+	// mark a backward seek was launched from is deliberately kept.
+	cl_wasmRecordsRead = 0;
+	cl_wasmFirstRecordIndex = -1;
+#endif
 
 	Con_Close();
 

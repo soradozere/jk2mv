@@ -557,10 +557,13 @@
             // simply grows to the furthest point reached.
             function startTimeline() {
                 var demoTime = Module.cwrap('JKD_GetDemoTime', 'number', []);
+                var elapsedTime = Module.cwrap('JKD_GetElapsedTime', 'number', []);
                 var seekTo = Module.cwrap('JKD_SeekTo', 'number', ['number']);
                 var furthestTime = Module.cwrap('JKD_GetFurthestTime', 'number', []);
+                var estimateDuration = Module.cwrap('JKD_GetEstimatedDuration', 'number', []);
                 var declared = parseFloat(__params.get('duration') || '0') * 1000;
-                var origin = null, furthest = 0, dragging = false, seeking = false;
+                var estimated = 0;
+                var furthest = 0, dragging = false, seeking = false;
 
                 // The engine reports the real length once a demo has run to the
                 // end. Trust that over anything we were told: seeking past the
@@ -576,7 +579,12 @@
                     if (m < 60) return m + ':' + String(s % 60).padStart(2, '0');
                     return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
                 }
-                function span() { return Math.max(declared, furthest, 1000); }
+                // Prefer a duration we were given, then the engine's estimate,
+                // then the furthest point actually reached. The last of those is
+                // only a floor -- on its own it makes the whole bar mean "what
+                // I've watched so far", which on a long demo looks like a
+                // scrubber that doesn't move.
+                function span() { return Math.max(declared || estimated, furthest, 1000); }
 
                 window.JKD_seekDone = function () { seeking = false; };
 
@@ -586,9 +594,12 @@
                 });
                 els.timeline.addEventListener('change', function () {
                     dragging = false;
-                    if (origin === null) return;
+                    var now = demoTime(), elapsed = elapsedTime();
+                    if (now < 0 || elapsed < 0) return;
                     seeking = true;
-                    var target = origin + (els.timeline.value / 1000) * span();
+                    // seek in absolute server time, which is what the engine
+                    // works in; the bar's own units are elapsed from the start
+                    var target = (now - elapsed) + (els.timeline.value / 1000) * span();
                     // a backward seek restarts the demo and finishes asynchronously,
                     // which is why the flag is cleared by JKD_seekDone rather than here
                     if (seekTo(Math.round(target)) >= 0) seeking = false;
@@ -596,15 +607,17 @@
                 });
 
                 setInterval(function () {
-                    var t = demoTime();
-                    if (t < 0) return;
-                    if (origin === null) origin = t;
-                    var elapsed = t - origin;
+                    var elapsed = elapsedTime();
+                    if (elapsed < 0) return;
                     if (elapsed > furthest) furthest = elapsed;
                     // seeking explores ahead of playback, so take the engine's
                     // high-water mark too rather than only what we've watched
                     var seen = furthestTime();
                     if (seen > furthest) furthest = seen;
+                    // sharpens as more of the file is consumed; the first call
+                    // walks the record headers, so it is deliberately not made
+                    // until playback is actually under way
+                    if (!declared) estimated = estimateDuration() || estimated;
                     els.timeTotal.textContent = fmt(span());
                     if (dragging || seeking) return;
                     els.timeNow.textContent = fmt(elapsed);
