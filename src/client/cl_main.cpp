@@ -1130,6 +1130,14 @@ void CL_PlayDemo_f( void ) {
 	// mark a backward seek was launched from is deliberately kept.
 	cl_wasmRecordsRead = 0;
 	cl_wasmFirstRecordIndex = -1;
+	// A *different* demo is the one case where keeping them is wrong: they are
+	// absolute server times from the old recording, so elapsed would be measured
+	// against a file that is no longer open. The page can swap demos without
+	// reloading (the engine outlives a route change), so this really happens.
+	if ( Q_stricmp( arg, cl_wasmDemoName ) ) {
+		cl_wasmFirstDemoTime = 0;
+		cl_wasmFinalDemoTime = 0;
+	}
 	// taken from arg, not clc.demoName, which has already been truncated by now
 	Q_strncpyz( cl_wasmDemoName, arg, sizeof( cl_wasmDemoName ) );
 #endif
