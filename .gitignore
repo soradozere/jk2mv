@@ -103,5 +103,7 @@ GPATH
 # WASM build artifacts and local assets (not for git)
 GameData/
 build-wasm/
+build-wasm-release/
+GameData/base-slim/
 wasm/cg_rename.h
 wasm/ui_rename.h
