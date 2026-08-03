@@ -124,11 +124,21 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetDemoTime( void ) {
 	if ( !clc.demoplaying || !cl.snap.valid || !cl.serverTime ) {
 		return -1;
 	}
-	if ( cl.serverTime > cl_wasmFinalDemoTime ) {
+	/*
+	Only extend the high-water mark, never anchor from here.
+
+	Anchoring in this function as well as in the snapshot parser made two
+	unsynchronised sources of truth for where a demo begins, and a poll landing
+	in the gap between opening a new demo and parsing its first snapshot would
+	take the base from the recording being left behind. Server times are
+	absolute and unrelated between demos, so the difference between one demo's
+	base and another's position is arbitrary -- which is how a two-minute clip
+	came to show a timeline a hundred and nine hours long, and why scrubbing it
+	was hopeless. The parser anchors both values together; this only ever
+	widens the range once that has happened.
+	*/
+	if ( cl_wasmFirstDemoTime && cl.serverTime > cl_wasmFinalDemoTime ) {
 		cl_wasmFinalDemoTime = cl.serverTime;
-	}
-	if ( !cl_wasmFirstDemoTime ) {
-		cl_wasmFirstDemoTime = cl.serverTime;
 	}
 	return cl.serverTime;
 }
@@ -487,6 +497,27 @@ EMSCRIPTEN_KEEPALIVE const char *JKD_GetClientState( void ) {
 // Raw CS_PLAYERS configstring for a client ("n\name\t\team\..."), or "" if that
 // slot is empty. The page parses it rather than the engine, so adding a field to
 // the POV picker later doesn't mean another export and another rebuild.
+/*
+Any configstring by index, or "" if it is not set.
+
+CS_SERVERINFO (0) is the one the page wants -- it carries \mapname\, which is
+how a demo says which map it is on without anyone having to type it in at
+upload time. Generic rather than a JKD_GetMapName, for the same reason
+JKD_GetPlayerInfo hands over the raw string: the next field somebody wants
+should not cost another export and another rebuild.
+*/
+EMSCRIPTEN_KEEPALIVE const char *JKD_GetConfigString( int index ) {
+	const char *cs;
+
+	if ( !clc.demoplaying || index < 0 || index >= MAX_CONFIGSTRINGS ) {
+		return "";
+	}
+	cs = cl.gameState.stringOffsets[ index ]
+		? cl.gameState.stringData + cl.gameState.stringOffsets[ index ]
+		: NULL;
+	return cs ? cs : "";
+}
+
 EMSCRIPTEN_KEEPALIVE const char *JKD_GetPlayerInfo( int clientNum ) {
 	const char *cs;
 
@@ -1036,7 +1067,11 @@ void CL_ReadDemoMessage( void ) {
 	if ( cl_wasmFirstRecordIndex < 0 && clc.demoplaying && cl.snap.valid && cl.snap.serverTime ) {
 		cl_wasmFirstRecordIndex = cl_wasmRecordsRead;
 		if ( !cl_wasmFirstDemoTime ) {
+			// Both ends of the range are anchored together, from the same
+			// snapshot of the same recording -- see JKD_GetDemoTime for what
+			// went wrong when they could be set from different demos.
 			cl_wasmFirstDemoTime = cl.snap.serverTime;
+			cl_wasmFinalDemoTime = cl.snap.serverTime;
 		}
 	}
 #endif
