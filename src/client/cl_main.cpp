@@ -3365,6 +3365,28 @@ static void CL_WasmObituary_f( void ) {
 	}, atoi( Cmd_Argv( 1 ) ), atoi( Cmd_Argv( 2 ) ),
 	   atoi( Cmd_Argv( 3 ) ), atoi( Cmd_Argv( 4 ) ) );
 }
+
+/*
+====================
+CL_WasmCenterPrint_f
+
+Hands a centre print to the page: jkd_centerprint "<text>".
+
+Carries the flag and scoring messages, which the engine can no longer draw
+legibly. Colour codes are left in -- the page strips them, and it is the only
+side that knows how the text should look.
+====================
+*/
+static void CL_WasmCenterPrint_f( void ) {
+	if ( Cmd_Argc() < 2 ) {
+		return;
+	}
+	EM_ASM( {
+		if ( window.JKD_onCenterPrint ) {
+			window.JKD_onCenterPrint( UTF8ToString( $0 ) );
+		}
+	}, Cmd_Argv( 1 ) );
+}
 #endif
 
 /*
@@ -3545,6 +3567,7 @@ void CL_Init( void ) {
 
 #ifdef __EMSCRIPTEN__
 	Cmd_AddCommand ("jkd_obituary", CL_WasmObituary_f);
+	Cmd_AddCommand ("jkd_centerprint", CL_WasmCenterPrint_f);
 #endif
 
 	CL_InitRef();

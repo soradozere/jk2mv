@@ -111,6 +111,28 @@
             display: none;
         }
 
+        /* Flag and scoring announcements, above the kill message: someone
+           scoring and someone dying are often the same moment. */
+        #announceMsg {
+            position: fixed;
+            top: 18%;
+            left: 0;
+            right: 0;
+            z-index: 40;
+            text-align: center;
+            pointer-events: none;
+            font-size: 19px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+            color: #7fe6f5;
+            text-shadow: 0 2px 14px rgba(0, 0, 0, .9);
+        }
+
+        #announceMsg[hidden] {
+            display: none;
+        }
+
         #killMsg b {
             font-weight: 700;
         }
@@ -281,6 +303,7 @@
     <!-- Kill messages. The engine generates and draws its own centre print
          correctly, but its 2D text rasterises as blank glyphs in this build, so
          the page draws them instead -- which is where they were headed anyway. -->
+    <div id="announceMsg" hidden></div>
     <div id="killMsg" hidden></div>
 
     <div id="controls" hidden>
@@ -857,6 +880,28 @@
                     killEl.style.animation = '';
                     shownAt = elapsedTime();
                 }
+
+                // Flag and scoring announcements, forwarded from the engine's
+                // centre prints because it can no longer draw them legibly.
+                var announceEl = document.getElementById('announceMsg');
+                var announceAt = -1;
+
+                window.JKD_onCenterPrint = function (text) {
+                    var clean = (text || '').replace(/\^./g, '').replace(/\s+/g, ' ').trim();
+                    if (!clean) return;
+                    announceEl.textContent = clean;
+                    announceEl.hidden = false;
+                    announceAt = elapsedTime();
+                };
+
+                setInterval(function () {
+                    if (announceAt < 0) return;
+                    var now = elapsedTime();
+                    if (now < 0 || now < announceAt || now - announceAt > 4000) {
+                        announceAt = -1;
+                        announceEl.hidden = true;
+                    }
+                }, 100);
 
                 window.JKD_onKill = function (target, attacker, mod, viewed) {
                     if (viewed < 0) return;
