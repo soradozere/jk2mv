@@ -146,6 +146,32 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetElapsedTime( void ) {
 	return now - cl_wasmFirstDemoTime;
 }
 
+// The match clock, in milliseconds since the level started, or -1 if the demo
+// has not said yet.
+//
+// Different from JKD_GetElapsedTime, and the difference is the point: elapsed
+// time is a position in the file, while this is the time on the scoreboard. A
+// recording that starts eight minutes into a match opens at elapsed 0 and match
+// time 8:00, which is the figure anyone talking about the match would use.
+//
+// The server publishes its start time as a configstring, so this is a
+// subtraction rather than anything the client has to track (same idiom as
+// cl_demos_auto.cpp's timestamps).
+EMSCRIPTEN_KEEPALIVE int JKD_GetMatchTime( void ) {
+	const char *startTime;
+
+	if ( !clc.demoplaying || !cl.snap.valid || !cl.serverTime ) {
+		return -1;
+	}
+
+	startTime = cl.gameState.stringData + cl.gameState.stringOffsets[CS_LEVEL_START_TIME];
+	if ( !startTime[0] ) {
+		// Warmup, or a demo whose gamestate predates the level start.
+		return -1;
+	}
+	return cl.serverTime - atoi( startTime );
+}
+
 // How far into the demo we have ever got, in milliseconds. Once a demo has run
 // to the end this is its real length, which lets a scrubber correct a range it
 // was given wrongly -- or had to guess at.
