@@ -467,6 +467,20 @@
                 heightVal: document.getElementById('heightVal')
             };
 
+            // Strip colour markup from a name. Stock JK2 has one form, ^1;
+            // community clients add ^x + 3 hex (12-bit), ^X + 6 hex (24-bit)
+            // and ^Y + 8 hex (RGBA). Each carries a run of hex digits that a
+            // naive ^-plus-one-character strip leaves stranded mid-name, which
+            // is how "Prismatic" was reading as "a00Pa00rism0b2a19ct70cid0bc".
+            // Longest first, and case matters: ^x and ^X take different counts.
+            function stripColours(s) {
+                return (s || '')
+                    .replace(/\^Y[0-9a-fA-F]{8}/g, '')
+                    .replace(/\^X[0-9a-fA-F]{6}/g, '')
+                    .replace(/\^x[0-9a-fA-F]{3}/g, '')
+                    .replace(/\^./g, '');
+            }
+
             var paused = false;
             var camMode = 'first';
             var speed = 1;
@@ -801,7 +815,7 @@
                         if (team !== 1 && team !== 2) continue;
                         players.push({
                             num: i,
-                            name: nm ? nm[1].replace(/\^./g, '') : ('client ' + i),
+                            name: nm ? stripColours(nm[1]) : ('client ' + i),
                             team: team,
                             visible: !!(vis & (1 << i))
                         });
@@ -863,7 +877,7 @@
                 function nameOf(num) {
                     var cs = playerInfo(num) || '';
                     var nm = /^n\\([^\\]*)/.exec(cs);
-                    return nm ? nm[1].replace(/\^./g, '') : ('client ' + num);
+                    return nm ? stripColours(nm[1]) : ('client ' + num);
                 }
 
                 // Built as text nodes, never innerHTML: a player name is whatever
@@ -887,7 +901,7 @@
                 var announceAt = -1;
 
                 window.JKD_onCenterPrint = function (text) {
-                    var clean = (text || '').replace(/\^./g, '').replace(/\s+/g, ' ').trim();
+                    var clean = stripColours(text).replace(/\s+/g, ' ').trim();
                     if (!clean) return;
                     announceEl.textContent = clean;
                     announceEl.hidden = false;
@@ -966,7 +980,7 @@
                     labelEl.textContent = verb;
                     // "n\<name>\t\<team>\..." -- strip JK2's ^n colour codes
                     var m = /^n\\([^\\]*)/.exec(playerInfo(n) || '');
-                    var name = m ? m[1].replace(/\^./g, '') : '';
+                    var name = m ? stripColours(m[1]) : '';
                     nameEl.textContent = name;
                     followEl.hidden = !name;
                 }, 250);
