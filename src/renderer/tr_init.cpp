@@ -1154,7 +1154,26 @@ void R_Register( void )
 	r_texturebits = ri.Cvar_Get("r_texturebits", "0", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 	r_texturebitslm = ri.Cvar_Get("r_texturebitslm", "0", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 	r_overBrightBits = ri.Cvar_Get("r_overBrightBits", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
+	/*
+	Brighter by default in the browser, because the usual route to it is closed.
+
+	Overbright normally comes from the hardware gamma ramp: r_overBrightBits
+	halves everything via identityLight and the ramp doubles it back, netting
+	the extra stop. There is no ramp here -- postprocessing gamma needs ARB
+	assembly programs GL4ES doesn't provide, and hardware gamma needs
+	SDL_SetWindowBrightness, which a canvas has no equivalent of -- so the gamma
+	method falls all the way back to GAMMA_NONE. That forces overbrightBits to
+	0 and, in R_LightScaleTexture, skips the gamma table entirely.
+
+	r_intensity is the one part of that path still standing: it is applied to
+	every texture at upload regardless of gamma method. 2 is exactly the stop
+	that overbright would have given, done in software instead.
+	*/
+#ifdef __EMSCRIPTEN__
+	r_intensity = ri.Cvar_Get("r_intensity", "2", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
+#else
 	r_intensity = ri.Cvar_Get("r_intensity", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
+#endif
 	r_aspectratio = ri.Cvar_Get("r_aspectratio", "-1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH); // screen resolutions
 	r_customaspect = ri.Cvar_Get("r_customaspect", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 	r_simpleMipMaps = ri.Cvar_Get("r_simpleMipMaps", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
