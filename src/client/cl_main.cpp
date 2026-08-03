@@ -3465,8 +3465,9 @@ void CL_Init( void ) {
 	m_yaw = Cvar_Get("m_yaw", "0.022", CVAR_ARCHIVE | CVAR_GLOBAL);
 	m_forward = Cvar_Get("m_forward", "0.25", CVAR_ARCHIVE | CVAR_GLOBAL);
 	m_side = Cvar_Get("m_side", "0.25", CVAR_ARCHIVE | CVAR_GLOBAL);
-#ifdef MACOS_X
-		// Input is jittery on OS X w/o this
+#if defined(MACOS_X) || defined(__EMSCRIPTEN__)
+		// Input is jittery on OS X w/o this -- doubly true in a browser, where
+		// frame timing is even less consistent than a native build's.
 	m_filter = Cvar_Get ("m_filter", "1", CVAR_ARCHIVE | CVAR_GLOBAL);
 #else
 	m_filter = Cvar_Get("m_filter", "0", CVAR_ARCHIVE | CVAR_GLOBAL);
