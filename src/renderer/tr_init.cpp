@@ -1147,7 +1147,15 @@ void R_Register( void )
 	r_DynamicGlowWidth = ri.Cvar_Get("r_DynamicGlowWidth", "320", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 	r_DynamicGlowHeight = ri.Cvar_Get("r_DynamicGlowHeight", "240", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 
+#ifdef __EMSCRIPTEN__
+	// Stock default (1) drops the top mip level off every texture -- a sensible
+	// memory saver on 2003 GPUs, just dead weight here: the bundle is already
+	// disk-space-trimmed to what a demo needs, so there is nothing left to gain
+	// by also blurring what we do ship.
+	r_picmip = ri.Cvar_Get("r_picmip", "0", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
+#else
 	r_picmip = ri.Cvar_Get("r_picmip", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
+#endif
 	r_colorMipLevels = ri.Cvar_Get ("r_colorMipLevels", "0", CVAR_LATCH );
 	AssertCvarRange( r_picmip, 0, 16, qtrue );
 	r_detailTextures = ri.Cvar_Get("r_detailtextures", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
