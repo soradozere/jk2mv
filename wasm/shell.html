@@ -606,7 +606,15 @@
                     releaseFocus();
                 });
 
+                var isSeeking = Module.cwrap('JKD_IsSeeking', 'number', []);
+
                 setInterval(function () {
+                    // Crossing hours of demo takes a few seconds even at ~2000x
+                    // realtime, so say so instead of looking unresponsive.
+                    if (isSeeking()) {
+                        els.timeNow.textContent = 'seeking…';
+                        return;
+                    }
                     var elapsed = elapsedTime();
                     if (elapsed < 0) return;
                     if (elapsed > furthest) furthest = elapsed;
