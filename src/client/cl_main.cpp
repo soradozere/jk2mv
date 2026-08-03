@@ -268,6 +268,29 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetConnectedMask( void ) {
 // cgame, which can't happen underneath a call from the page.
 static int	cl_wasmPendingSeek = -1;
 
+// Defined in cl_cgame.cpp with C++ linkage, so it has to be declared that way --
+// everything around here sits inside an extern "C" block for the JS exports.
+extern "C++" qboolean CL_GetServerCommand( int serverCommandNumber );
+
+/*
+Apply the reliable commands a seek has just skimmed past, and throw the text away.
+
+These are not only chat and console prints: configstring updates arrive this way
+too, and CL_GetServerCommand is what folds them into cl.gameState. Skipping them
+loses every player's name and team -- the POV picker empties out and the
+scoreboard forgets who is playing. Draining them here applies those side effects
+while cgame never sees the messages themselves, which is right: they are the
+history of a stretch the viewer just jumped over.
+
+It also keeps the ring from overflowing. It holds only the last handful, and
+cgame asking later for one that has been cycled out is fatal.
+*/
+static void CL_WasmDrainServerCommands( void ) {
+	while ( clc.lastExecutedServerCommand < clc.serverCommandSequence ) {
+		CL_GetServerCommand( clc.lastExecutedServerCommand + 1 );
+	}
+}
+
 // Advance towards a seek target for at most `budgetMs`, and report whether it
 // was reached. Sliced rather than run to completion because a long seek is
 // genuinely slow in wall-clock terms even at two thousand times realtime --
@@ -294,6 +317,7 @@ static qboolean CL_WasmSeekStep( int targetTime, int budgetMs ) {
 			break;		// hold on the final frame rather than falling off the end
 		}
 		CL_ReadDemoMessage();
+		CL_WasmDrainServerCommands();
 		if ( cl.snap.serverTime == before ) {
 			break;		// end of demo, or a stream that isn't advancing
 		}
@@ -307,11 +331,10 @@ static qboolean CL_WasmSeekStep( int targetTime, int budgetMs ) {
 
 static void CL_WasmSeekFinish( void ) {
 	if ( cls.state == CA_ACTIVE ) {
-		// Drop the reliable-command backlog. Thousands of chat lines and score
-		// updates accumulated during the replay, and the ring only holds the
-		// last handful -- cgame asking for one that has been cycled out is a
-		// fatal error. Everything before the seek target is history anyway.
-		clc.lastExecutedServerCommand = clc.serverCommandSequence;
+		// Commands are drained as the seek runs (see CL_WasmDrainServerCommands),
+		// so there is no backlog left here and, more to the point, the
+		// configstrings they carried have been applied rather than discarded.
+		CL_WasmDrainServerCommands();
 
 		// Re-anchor playback: cl.serverTime is derived from realtime plus this
 		// delta every frame, so without it the demo would snap straight back.

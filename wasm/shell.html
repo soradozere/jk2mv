@@ -533,6 +533,39 @@
                 }
             });
 
+            // The wheel is bound to weapon switching, which is meaningless when
+            // you're watching rather than playing. It drives the camera instead:
+            // distance while watching a player, field of view otherwise, which
+            // are the two things you actually reach for mid-demo.
+            canvasElement.addEventListener('wheel', function (e) {
+                e.preventDefault();
+                var step = e.deltaY > 0 ? 1 : -1;
+                if (camMode === 'third' || povFollow >= 0) {
+                    var r = Math.min(400, Math.max(20, parseInt(els.range.value, 10) + step * 15));
+                    els.range.value = r;
+                    els.rangeVal.textContent = r;
+                    setCvar('cg_thirdPersonRange', r);
+                } else {
+                    var f = Math.min(130, Math.max(60, parseInt(els.fov.value, 10) + step * 3));
+                    els.fov.value = f;
+                    els.fovVal.textContent = f;
+                    setCvar('cg_fov', f);
+                }
+            }, { passive: false });
+
+            // Left click cycles POV, the way attack cycles spectator targets in
+            // game. Not in free fly, where a click is how you grab the pointer to
+            // look around.
+            canvasElement.addEventListener('mousedown', function (e) {
+                if (e.button !== 0 || camMode === 'free') return;
+                var order = Array.prototype.map.call(els.povList.children, function (b) {
+                    return parseInt(b.dataset.client, 10);
+                });
+                if (order.length < 2) return;
+                var at = order.indexOf(povFollow);
+                setFollow(order[(at + 1) % order.length]);
+            });
+
             // Reveal on pointer activity near the bottom of the frame.
             var hideTimer = null;
             window.addEventListener('mousemove', function (e) {
@@ -588,21 +621,43 @@
 
                 window.JKD_seekDone = function () { seeking = false; };
 
-                els.timeline.addEventListener('pointerdown', function () { dragging = true; });
-                els.timeline.addEventListener('input', function () {
-                    els.timeNow.textContent = fmt(els.timeline.value / 1000 * span());
-                });
-                els.timeline.addEventListener('change', function () {
-                    dragging = false;
+                function seekToFraction(fraction) {
                     var now = demoTime(), elapsed = elapsedTime();
                     if (now < 0 || elapsed < 0) return;
                     seeking = true;
                     // seek in absolute server time, which is what the engine
                     // works in; the bar's own units are elapsed from the start
-                    var target = (now - elapsed) + (els.timeline.value / 1000) * span();
-                    // a backward seek restarts the demo and finishes asynchronously,
-                    // which is why the flag is cleared by JKD_seekDone rather than here
-                    if (seekTo(Math.round(target)) >= 0) seeking = false;
+                    seekTo(Math.round((now - elapsed) + fraction * span()));
+                }
+
+                // Seek while dragging, not only on release. Waiting for `change`
+                // means one seek at the end of a gesture with no feedback during
+                // it, and if that event doesn't arrive -- a drag that leaves the
+                // control, a release outside the window -- nothing happens at all
+                // and the scrubber looks dead. Throttled so a drag across the bar
+                // doesn't queue a hundred of them.
+                var lastSeek = 0, pendingSeek = null;
+                function requestSeek() {
+                    var fraction = els.timeline.value / 1000;
+                    els.timeNow.textContent = fmt(fraction * span());
+                    var wait = 120 - (performance.now() - lastSeek);
+                    clearTimeout(pendingSeek);
+                    if (wait <= 0) {
+                        lastSeek = performance.now();
+                        seekToFraction(fraction);
+                    } else {
+                        pendingSeek = setTimeout(function () {
+                            lastSeek = performance.now();
+                            seekToFraction(els.timeline.value / 1000);
+                        }, wait);
+                    }
+                }
+
+                els.timeline.addEventListener('pointerdown', function () { dragging = true; });
+                els.timeline.addEventListener('input', requestSeek);
+                els.timeline.addEventListener('change', function () {
+                    dragging = false;
+                    requestSeek();
                     releaseFocus();
                 });
 
@@ -626,6 +681,10 @@
                     // walks the record headers, so it is deliberately not made
                     // until playback is actually under way
                     if (!declared) estimated = estimateDuration() || estimated;
+                    // Until the length is known the bar can only span what has
+                    // been watched, so dragging it would move playback by a few
+                    // seconds and look broken. Better to say it isn't ready.
+                    els.timeline.disabled = !(declared || estimated);
                     els.timeTotal.textContent = fmt(span());
                     if (dragging || seeking) return;
                     els.timeNow.textContent = fmt(elapsed);
