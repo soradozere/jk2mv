@@ -1128,10 +1128,14 @@ void R_Register( void )
 	r_ext_gamma_control = ri.Cvar_Get("r_ext_gamma_control", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 	r_ext_multitexture = ri.Cvar_Get("r_ext_multitexture", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 #ifdef __EMSCRIPTEN__
-	// GL4ES's GLES2 backend advertises GL_EXT_compiled_vertex_array (a legacy
-	// perf hint with no real GLES2 equivalent) but doesn't actually export
-	// glLockArraysEXT/glUnlockArraysEXT, so WIN_GL_GetProcAddress returns NULL
-	// and the engine treats that as fatal ("bad getprocaddress"). Default off.
+	// Off here, but no longer because the entry points are missing: GL4ES does
+	// export them, under its own gl4es_ names, and WIN_GL_GetProcAddress hands
+	// them out now (see sdl_window.cpp). Off because it measurably costs --
+	// locking arrays gains nothing on a GLES2 backend that has to re-submit
+	// them anyway, and it charges for the bookkeeping. Backend time per frame,
+	// same frozen frame of a CTF demo, multitexture on for both:
+	//     CVA off   28.8ms
+	//     CVA on    40.5ms
 	r_ext_compiled_vertex_array = ri.Cvar_Get("r_ext_compiled_vertex_array", "0", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 #else
 	r_ext_compiled_vertex_array = ri.Cvar_Get("r_ext_compiled_vertex_array", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);

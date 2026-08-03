@@ -1233,8 +1233,56 @@ void WIN_SetGamma( glconfig_t *glConfig, byte red[256], byte green[256], byte bl
 	}
 }
 
+#ifdef __EMSCRIPTEN__
+/*
+===============
+Extension entry points, resolved from the binary rather than from SDL.
+
+GL4ES is statically linked here, and its AliasExport macro is a no-op under
+Emscripten (see lib/gl4es/src/gl/attributes.h -- the aliasing branch is
+`#if !defined(__EMSCRIPTEN__)`), so the ARB/EXT spellings the renderer asks
+for do not exist as symbols at all. SDL_GL_GetProcAddress therefore returned
+NULL for every one of them, and the renderer quietly took its slow paths:
+`multitexture: disabled` means every lit world surface is drawn twice, once
+for the texture and again to blend the lightmap over it.
+
+Only the entry points GL4ES genuinely implements are listed. The NV register
+combiners and ARB vertex/fragment programs the renderer also probes for have
+no GL4ES implementation, and NULL is the honest answer for those -- handing
+back a wrong address would turn a disabled feature into a crash.
+===============
+*/
+#include <GL/gl.h>
+
+extern "C" {
+	void gl4es_glActiveTexture( GLenum texture );
+	void gl4es_glClientActiveTexture( GLenum texture );
+	void gl4es_glMultiTexCoord2f( GLenum target, GLfloat s, GLfloat t );
+	void gl4es_glLockArrays( GLint first, GLsizei count );
+	void gl4es_glUnlockArrays( void );
+}
+
+static const struct {
+	const char	*name;
+	void		*fn;
+} s_gl4esProcs[] = {
+	{ "glActiveTextureARB",			(void *)gl4es_glActiveTexture },
+	{ "glClientActiveTextureARB",	(void *)gl4es_glClientActiveTexture },
+	{ "glMultiTexCoord2fARB",		(void *)gl4es_glMultiTexCoord2f },
+	{ "glLockArraysEXT",			(void *)gl4es_glLockArrays },
+	{ "glUnlockArraysEXT",			(void *)gl4es_glUnlockArrays },
+};
+#endif
+
 void *WIN_GL_GetProcAddress( const char *proc )
 {
+#ifdef __EMSCRIPTEN__
+	for ( size_t i = 0; i < ARRAY_LEN( s_gl4esProcs ); i++ ) {
+		if ( !strcmp( proc, s_gl4esProcs[i].name ) ) {
+			return s_gl4esProcs[i].fn;
+		}
+	}
+#endif
 	return SDL_GL_GetProcAddress( proc );
 }
 
