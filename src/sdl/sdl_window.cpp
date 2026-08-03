@@ -1066,11 +1066,14 @@ window_t WIN_Init( const windowDesc_t *windowDesc, glconfig_t *glConfig )
 	r_displayRefresh	= Cvar_Get( "r_displayRefresh",		"0",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH );
 	r_savedWindows		= Cvar_Get( "r_savedWindows",		" ",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_ROM );
 #ifdef __EMSCRIPTEN__
-	// Off by default in the browser: the canvas is already sized in CSS pixels,
-	// so allowing high-dpi just makes the backing store devicePixelRatio times
-	// larger (4x the fragments at dpr 2) for an image CSS scales straight back
-	// down again.
-	r_highdpi			= Cvar_Get( "r_highdpi",			"0",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH );
+	// On: without SDL_WINDOW_ALLOW_HIGHDPI, Emscripten sizes the canvas's
+	// backing store in CSS pixels, not device pixels, so on any dpr>1 display
+	// (any Retina Mac) the browser then stretches that lower-res framebuffer
+	// back up to fill the physical pixels -- soft edges and blurry player
+	// models everywhere, not just on textures a picmip fix can reach. Costs
+	// more fragment work (4x at dpr 2), but this is a demo viewer, not a
+	// twitch shooter chasing frame budget.
+	r_highdpi			= Cvar_Get( "r_highdpi",			"1",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH );
 #else
 	r_highdpi			= Cvar_Get( "r_highdpi",			"1",		CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH );
 #endif
