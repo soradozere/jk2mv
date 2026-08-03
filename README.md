@@ -1,6 +1,15 @@
 # JK2MV
 https://jk2mv.org
 
+> **This is Soracle's fork**, carrying the in-browser `.dm_15` demo viewer used at
+> soracle.vercel.app: an Emscripten/WebAssembly build target (`wasm/`), demo
+> playback controls (seeking, POV switching, free camera), and browser-specific
+> fixes. Upstream is [mvdevs/jk2mv](https://github.com/mvdevs/jk2mv); the
+> gameplay-module fork is [soradozere/mvsdk](https://github.com/soradozere/mvsdk)
+> and the patched GL translation layer is
+> [soradozere/gl4es](https://github.com/soradozere/gl4es). Like upstream, GPLv2.
+> Game assets are not part of this repository.
+
 JK2MV (Multi Version) is a modification for Jedi Knight II: Jedi Outcast. It supports all three game versions and comes with various features and optimizations.
 
 Main Features:
