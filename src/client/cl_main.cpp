@@ -268,6 +268,28 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetConnectedMask( void ) {
 // cgame, which can't happen underneath a call from the page.
 static int	cl_wasmPendingSeek = -1;
 
+/*
+A seek must never run with the demo frozen, so the freeze is lifted for the
+duration and put back afterwards. This is not a nicety.
+
+CL_SetCGameTime ends with
+
+	while ( cl.serverTime >= cl.snap.serverTime ) { CL_ReadDemoMessage(); }
+
+and that loop runs whether or not the demo is frozen -- but cl.serverTime is only
+updated in the *un*frozen branch above it. Freeze the demo and cl.serverTime is
+pinned wherever it was; restart the demo under a backward seek and cl.snap
+.serverTime drops back to the start of the file. The loop then tears through
+thousands of messages in a single frame to catch up to a timestamp that no longer
+means anything, and it does so without draining the reliable command ring, so
+every configstring in that stretch is lost.
+
+The visible result is entities rendering as the wrong model: a turret whose
+model index no longer resolves ends up as some other model, cgame asks it for
+"bone_hinge", and Ghoul2 aborts the engine outright.
+*/
+static int	cl_wasmSeekWasFrozen = 0;
+
 // Defined in cl_cgame.cpp with C++ linkage, so it has to be declared that way --
 // everything around here sits inside an extern "C" block for the JS exports.
 extern "C++" qboolean CL_GetServerCommand( int serverCommandNumber );
@@ -364,6 +386,9 @@ void CL_WasmCheckPendingSeek( void ) {
 	}
 	CL_WasmSeekFinish();
 	cl_wasmPendingSeek = -1;
+	// Back to however the viewer had it: a seek started from a paused demo
+	// should land paused, not start playing on its own.
+	Cvar_SetValue( "cl_freezeDemo", (float)cl_wasmSeekWasFrozen );
 	EM_ASM( { if (window.JKD_seekDone) { window.JKD_seekDone(); } } );
 }
 
@@ -373,6 +398,14 @@ EMSCRIPTEN_KEEPALIVE int JKD_SeekTo( int targetTime ) {
 	if ( !clc.demoplaying || !clc.demofile ) {
 		return -1;
 	}
+
+	// Only the seek that starts a gesture records the freeze state; one issued
+	// while another is still running would otherwise save the lifted value and
+	// leave a paused demo playing when it lands.
+	if ( cl_wasmPendingSeek < 0 ) {
+		cl_wasmSeekWasFrozen = cl_freezeDemo->integer;
+	}
+	Cvar_Set( "cl_freezeDemo", "0" );
 
 	cl_wasmPendingSeek = targetTime;
 	if ( targetTime <= cl.snap.serverTime ) {

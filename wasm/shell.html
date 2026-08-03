@@ -553,19 +553,6 @@
                 }
             }, { passive: false });
 
-            // Left click cycles POV, the way attack cycles spectator targets in
-            // game. Not in free fly, where a click is how you grab the pointer to
-            // look around.
-            canvasElement.addEventListener('mousedown', function (e) {
-                if (e.button !== 0 || camMode === 'free') return;
-                var order = Array.prototype.map.call(els.povList.children, function (b) {
-                    return parseInt(b.dataset.client, 10);
-                });
-                if (order.length < 2) return;
-                var at = order.indexOf(povFollow);
-                setFollow(order[(at + 1) % order.length]);
-            });
-
             // Reveal on pointer activity near the bottom of the frame.
             var hideTimer = null;
             window.addEventListener('mousemove', function (e) {
@@ -619,45 +606,78 @@
                 // scrubber that doesn't move.
                 function span() { return Math.max(declared || estimated, furthest, 1000); }
 
-                window.JKD_seekDone = function () { seeking = false; };
-
                 function seekToFraction(fraction) {
                     var now = demoTime(), elapsed = elapsedTime();
                     if (now < 0 || elapsed < 0) return;
                     seeking = true;
+                    seekTarget = null;
                     // seek in absolute server time, which is what the engine
                     // works in; the bar's own units are elapsed from the start
                     seekTo(Math.round((now - elapsed) + fraction * span()));
                 }
 
-                // Seek while dragging, not only on release. Waiting for `change`
-                // means one seek at the end of a gesture with no feedback during
-                // it, and if that event doesn't arrive -- a drag that leaves the
-                // control, a release outside the window -- nothing happens at all
-                // and the scrubber looks dead. Throttled so a drag across the bar
-                // doesn't queue a hundred of them.
-                var lastSeek = 0, pendingSeek = null;
-                function requestSeek() {
+                // Seek while dragging, not only on release: waiting for `change`
+                // means no feedback during the gesture, and if that event never
+                // arrives -- a drag that leaves the control, a release outside the
+                // window -- nothing happens at all and the scrubber looks dead.
+                //
+                // But a drag can't just fire seeks freely, which is what made
+                // scrubbing lurch. Two rules keep it steady:
+                //
+                //   Only one seek is ever in flight. A drag produces dozens of
+                //   positions; each one landing on top of an unfinished seek made
+                //   the picture chase the thumb from behind. The latest position
+                //   is remembered instead and issued when the engine reports done,
+                //   so we always seek to where the thumb *is*, never where it was.
+                //
+                //   No backward seeks mid-gesture. Going back has no shortcut --
+                //   the demo restarts and replays from the top -- so dragging left
+                //   across the bar was tearing down and rebuilding cgame several
+                //   times a second. Deferred to release, where one restart is fine.
+                //
+                // Playback is also frozen for the duration, so time doesn't creep
+                // forward underneath a thumb that's trying to hold still.
+                var seekTarget = null, resumeAfterSeek = false;
+
+                window.JKD_seekDone = function () {
+                    seeking = false;
+                    if (seekTarget !== null) {
+                        var next = seekTarget;
+                        seekTarget = null;
+                        seekToFraction(next);
+                    } else if (resumeAfterSeek) {
+                        resumeAfterSeek = false;
+                        setPaused(false);
+                    }
+                };
+
+                function requestSeek(allowBackward) {
                     var fraction = els.timeline.value / 1000;
                     els.timeNow.textContent = fmt(fraction * span());
-                    var wait = 120 - (performance.now() - lastSeek);
-                    clearTimeout(pendingSeek);
-                    if (wait <= 0) {
-                        lastSeek = performance.now();
-                        seekToFraction(fraction);
-                    } else {
-                        pendingSeek = setTimeout(function () {
-                            lastSeek = performance.now();
-                            seekToFraction(els.timeline.value / 1000);
-                        }, wait);
+                    if (!allowBackward && fraction * span() < elapsedTime()) {
+                        seekTarget = null;		// held for release
+                        return;
                     }
+                    if (seeking) { seekTarget = fraction; return; }
+                    seekToFraction(fraction);
                 }
 
-                els.timeline.addEventListener('pointerdown', function () { dragging = true; });
-                els.timeline.addEventListener('input', requestSeek);
+                els.timeline.addEventListener('pointerdown', function () {
+                    dragging = true;
+                    resumeAfterSeek = !paused;
+                    setPaused(true);
+                });
+                els.timeline.addEventListener('input', function () { requestSeek(false); });
                 els.timeline.addEventListener('change', function () {
                     dragging = false;
-                    requestSeek();
+                    // The gesture is over, so the exact position wins even if it
+                    // means the one expensive restart a backward jump costs.
+                    seekTarget = null;
+                    if (seeking) { seekTarget = els.timeline.value / 1000; }
+                    else { requestSeek(true); }
+                    // Nothing to wait on -- an unseekable demo, or a target we
+                    // were already sitting on -- so don't leave it paused.
+                    if (!seeking && resumeAfterSeek) { resumeAfterSeek = false; setPaused(false); }
                     releaseFocus();
                 });
 
