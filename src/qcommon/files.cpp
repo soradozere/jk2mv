@@ -16,6 +16,9 @@
 #include "qcommon.h"
 #include <unzip.h>	// minizip
 #include <mv_setup.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 #if !defined(DEDICATED) && !defined(FINAL_BUILD)
 #include "../client/client.h"
@@ -233,6 +236,23 @@ typedef struct searchpath_s {
 } searchpath_t;
 
 static	char		fs_gamedir[MAX_OSPATH];	// this will be a single file name with no separators
+
+#ifdef __EMSCRIPTEN__
+/*
+Records every file the game asks for, into window.JKD_fileManifest. See
+FS_FOpenFileReadHash.
+
+Off for shipping -- it costs a JS call per file open. Flip it to qtrue to
+re-measure, which is what you want after adding a map: play a demo on it, POST
+window.JKD_fileManifest to the dev server, and re-run tools/build-asset-bundle.py.
+
+It has to be compiled in rather than switched on at runtime, because a large
+part of what the bundle must contain -- menus, fonts, HUD art, the shader
+scripts -- is loaded during boot, before any page code could enable it.
+*/
+qboolean			fs_wasmManifest = qfalse;
+#endif
+
 static	cvar_t		*fs_debug;
 static	cvar_t		*fs_homepath;
 static	cvar_t		*fs_basepath;
@@ -1269,6 +1289,29 @@ int FS_FOpenFileReadHash(const char *filename, fileHandle_t *file, qboolean uniq
 	if ( !filename ) {
 		Com_Error( ERR_FATAL, "FS_FOpenFileRead: NULL 'filename' parameter passed" );
 	}
+
+#ifdef __EMSCRIPTEN__
+	/*
+	Record what the game actually asks for, so the shipped asset bundle can be
+	cut down to it.
+
+	Every request is logged, not just the successful ones -- a name that isn't
+	in any pk3 simply won't be there to keep when the manifest is intersected
+	with the archives, so misses cost nothing and the superset is safe. This is
+	the only honest way to size the bundle: guessing which of the shared
+	textures and models are single-player-only shows up later as a missing
+	texture on a map nobody tested.
+
+	Off unless the page turns it on (JKD_StartManifest), because it costs a JS
+	call per file open.
+	*/
+	if ( fs_wasmManifest ) {
+		EM_ASM( {
+			if ( !window.JKD_fileManifest ) { window.JKD_fileManifest = new Set(); }
+			window.JKD_fileManifest.add( UTF8ToString( $0 ) );
+		}, filename );
+	}
+#endif
 
 	Com_sprintf (demoExt, sizeof(demoExt), ".dm_%d", MV_GetCurrentProtocol());
 	// qpaths are not supposed to have a leading slash

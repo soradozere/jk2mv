@@ -482,12 +482,14 @@ set(EMS_LINK_FLAGS
                                # clobbering low memory including the stack cookie. Keep it enabled.
     "--profiling-funcs" # keep function names in the wasm binary so crash stack traces are symbolicated, not just addresses
     "--shell-file" "${CMAKE_SOURCE_DIR}/shell.html"
-    # base-slim, not base: every cold visitor downloads this bundle before
+    # base-min, not base: every cold visitor downloads this bundle before
     # anything renders, and roughly half of a stock JK2 install is content a
     # multiplayer demo viewer can never reach -- single-player maps, the
     # licensed soundtrack, the cinematics, and localised cutscene dialogue.
-    # Built by tools/trim-assets.sh, which leaves GameData/base untouched.
-    "--preload-file" "${ProjectRoot}/GameData/base-slim@base"
+    # Built by tools/trim-assets.sh then tools/build-asset-bundle.py, which
+    # cuts it to what a recorded playthrough actually opened. Neither writes to
+    # GameData/base.
+    "--preload-file" "${ProjectRoot}/GameData/base-min@base"
 )
 string(REPLACE ";" " " EMS_LINK_FLAGS_STR "${EMS_LINK_FLAGS}")
 set_target_properties(jk2mv_wasm PROPERTIES
