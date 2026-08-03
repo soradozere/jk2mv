@@ -92,6 +92,34 @@
             margin-bottom: 2px;
         }
 
+        #killMsg {
+            position: fixed;
+            top: 26%;
+            left: 0;
+            right: 0;
+            z-index: 40;
+            text-align: center;
+            pointer-events: none;
+            font-size: 27px;
+            font-weight: 500;
+            color: rgba(255, 255, 255, .93);
+            text-shadow: 0 2px 14px rgba(0, 0, 0, .9);
+            animation: killIn .16s ease-out;
+        }
+
+        #killMsg[hidden] {
+            display: none;
+        }
+
+        #killMsg b {
+            font-weight: 700;
+        }
+
+        @keyframes killIn {
+            from { opacity: 0; transform: translateY(-6px); }
+            to   { opacity: 1; transform: none; }
+        }
+
         /* Playback controls. Kept out of the way until the pointer is near the
            bottom of the frame, so they don't sit over the action while watching. */
         #controls {
@@ -249,6 +277,11 @@
          of the site, and so the engine's 2D layer keeps shrinking toward "just
          the player HUD" for the embedded build. -->
     <div id="following" hidden><span class="label" id="followLabel">Following</span><span id="followName"></span></div>
+
+    <!-- Kill messages. The engine generates and draws its own centre print
+         correctly, but its 2D text rasterises as blank glyphs in this build, so
+         the page draws them instead -- which is where they were headed anyway. -->
+    <div id="killMsg" hidden></div>
 
     <div id="controls" hidden>
         <div class="row" id="timelineRow">
@@ -782,6 +815,62 @@
                 }, 250);
             }
 
+            // Kill messages, driven by cgame through the jkd_obituary command.
+            // Only the two that concern whoever is being watched: the rest of the
+            // round's kills are noise when you're following one player.
+            function startKillFeed() {
+                var playerInfo = Module.cwrap('JKD_GetPlayerInfo', 'string', ['number']);
+                var elapsedTime = Module.cwrap('JKD_GetElapsedTime', 'number', []);
+                var killEl = document.getElementById('killMsg');
+                var shownAt = -1;
+
+                // Expire on demo time, not wall time. A message that faded while
+                // the demo was paused would be gone before you looked at it, and
+                // one left over from before a seek would describe a kill that
+                // hasn't happened yet -- so any jump in either direction clears it.
+                setInterval(function () {
+                    if (shownAt < 0) return;
+                    var now = elapsedTime();
+                    if (now < 0 || now < shownAt || now - shownAt > 3000) {
+                        shownAt = -1;
+                        killEl.hidden = true;
+                    }
+                }, 100);
+
+                function nameOf(num) {
+                    var cs = playerInfo(num) || '';
+                    var nm = /^n\\([^\\]*)/.exec(cs);
+                    return nm ? nm[1].replace(/\^./g, '') : ('client ' + num);
+                }
+
+                // Built as text nodes, never innerHTML: a player name is whatever
+                // was in the demo file, and this one is going onto a public page.
+                function show(lead, who) {
+                    killEl.textContent = lead;
+                    var b = document.createElement('b');
+                    b.textContent = nameOf(who);
+                    killEl.appendChild(b);
+                    killEl.hidden = false;
+                    // restart the entry animation for back-to-back kills
+                    killEl.style.animation = 'none';
+                    void killEl.offsetWidth;
+                    killEl.style.animation = '';
+                    shownAt = elapsedTime();
+                }
+
+                window.JKD_onKill = function (target, attacker, mod, viewed) {
+                    if (viewed < 0) return;
+                    // world deaths and suicides arrive with attacker out of the
+                    // client range or equal to the target; neither names anyone
+                    var byPlayer = attacker >= 0 && attacker < 32 && attacker !== target;
+                    if (attacker === viewed && byPlayer) {
+                        show('You killed ', target);
+                    } else if (target === viewed && byPlayer) {
+                        show('Killed by ', attacker);
+                    }
+                };
+            }
+
             // Who the demo is currently watching. Composed from the engine's own
             // state rather than mirrored, so it can't drift out of sync, and it's
             // the same pair of exports a POV picker will read.
@@ -888,6 +977,7 @@
                 startFollowReadout();
                 startPovPicker();
                 startTimeline();
+                startKillFeed();
                 if (__demoUrl) loadDemoFromUrl(__demoUrl);
 
                 var fov = getCvar('cg_fov') || 80;

@@ -3343,6 +3343,30 @@ void MV_UpdateClFlags( void )
 	}
 }
 
+#ifdef __EMSCRIPTEN__
+/*
+====================
+CL_WasmObituary_f
+
+Hands a kill to the page: jkd_obituary <target> <attacker> <mod> <viewed>.
+
+cgame issues this through the command buffer, which is the only channel it has
+to the engine that doesn't need a new trap. Client numbers only -- the page
+resolves names through JKD_GetPlayerInfo, so there is one place that knows how
+to render one.
+====================
+*/
+static void CL_WasmObituary_f( void ) {
+	if ( Cmd_Argc() < 5 ) {
+		return;
+	}
+	EM_ASM( {
+		if ( window.JKD_onKill ) { window.JKD_onKill( $0, $1, $2, $3 ); }
+	}, atoi( Cmd_Argv( 1 ) ), atoi( Cmd_Argv( 2 ) ),
+	   atoi( Cmd_Argv( 3 ) ), atoi( Cmd_Argv( 4 ) ) );
+}
+#endif
+
 /*
 ====================
 CL_Init
@@ -3518,6 +3542,10 @@ void CL_Init( void ) {
 	Cmd_AddCommand ("stopvideo", CL_StopVideo_f);
 	Cmd_AddCommand ("silent", CL_Silent_f);
 	Cmd_SetCommandCompletionFunc( "silent", CL_CompleteRedirect );
+
+#ifdef __EMSCRIPTEN__
+	Cmd_AddCommand ("jkd_obituary", CL_WasmObituary_f);
+#endif
 
 	CL_InitRef();
 
