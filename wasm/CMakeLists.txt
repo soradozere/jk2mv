@@ -477,9 +477,6 @@ set(EMS_LINK_FLAGS
     "-sINITIAL_MEMORY=134217728"
     "-sEXPORTED_RUNTIME_METHODS=['FS','run','callMain','ccall','cwrap']"
     "-sSTACK_SIZE=5MB"
-    "-sASSERTIONS=1"
-    "-sSTACK_OVERFLOW_CHECK=1" # this was firing for real: GL4ES writing through a NULL glstate was
-                               # clobbering low memory including the stack cookie. Keep it enabled.
     "--profiling-funcs" # keep function names in the wasm binary so crash stack traces are symbolicated, not just addresses
     "--shell-file" "${CMAKE_SOURCE_DIR}/shell.html"
     # base-min, not base: every cold visitor downloads this bundle before
@@ -491,6 +488,22 @@ set(EMS_LINK_FLAGS
     # GameData/base.
     "--preload-file" "${ProjectRoot}/GameData/base-min@base"
 )
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    # CMake's Release type only puts -O3 on the COMPILE lines; the emscripten
+    # LINK step is where wasm-opt runs over the whole module and the JS glue
+    # is optimised, and without an -O there it does neither.
+    list(APPEND EMS_LINK_FLAGS
+        "-O3"
+        "-sASSERTIONS=0"
+    )
+else()
+    list(APPEND EMS_LINK_FLAGS
+        "-sASSERTIONS=1"
+        "-sSTACK_OVERFLOW_CHECK=1" # this was firing for real: GL4ES writing through a NULL glstate was
+                                   # clobbering low memory including the stack cookie. Keep it in dev builds.
+    )
+endif()
+
 string(REPLACE ";" " " EMS_LINK_FLAGS_STR "${EMS_LINK_FLAGS}")
 set_target_properties(jk2mv_wasm PROPERTIES
     LINK_FLAGS "${EMS_LINK_FLAGS_STR}"

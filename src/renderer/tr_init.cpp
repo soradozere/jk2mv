@@ -1128,15 +1128,14 @@ void R_Register( void )
 	r_ext_gamma_control = ri.Cvar_Get("r_ext_gamma_control", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 	r_ext_multitexture = ri.Cvar_Get("r_ext_multitexture", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 #ifdef __EMSCRIPTEN__
-	// Off here, but no longer because the entry points are missing: GL4ES does
-	// export them, under its own gl4es_ names, and WIN_GL_GetProcAddress hands
-	// them out now (see sdl_window.cpp). Off because it measurably costs --
-	// locking arrays gains nothing on a GLES2 backend that has to re-submit
-	// them anyway, and it charges for the bookkeeping. Backend time per frame,
-	// same frozen frame of a CTF demo, multitexture on for both:
-	//     CVA off   28.8ms
-	//     CVA on    40.5ms
-	r_ext_compiled_vertex_array = ri.Cvar_Get("r_ext_compiled_vertex_array", "0", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
+	// ON, and it matters more here than anywhere: locking is what tells GL4ES
+	// a surface's arrays are stable, and its usevbo=3 path (patched to buffer
+	// every attrib on the first locked draw) moves them into a VBO in one
+	// upload. Without the lock every draw goes out as client arrays, which
+	// the GLES layer re-uploads attrib by attrib -- profiled at ~63% of all
+	// frame time. (An earlier measurement here said CVA off was faster; that
+	// was true when locking only added bookkeeping, before the VBO path.)
+	r_ext_compiled_vertex_array = ri.Cvar_Get("r_ext_compiled_vertex_array", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 #else
 	r_ext_compiled_vertex_array = ri.Cvar_Get("r_ext_compiled_vertex_array", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 #endif
