@@ -43,6 +43,14 @@ static int		cl_wasmFirstDemoTime = 0;
 // JKD_GetEstimatedDuration.
 int				cl_wasmRecordsRead = 0;
 static int		cl_wasmTotalRecords = -1;
+// Our own copy of the demo name, because clc.demoName is MAX_QPATH (64) and
+// real community filenames are longer than that -- the one in hand is 88
+// characters of date, player, server, map and pipeline suffix. Truncation there
+// is silent and only shows up later, when something tries to open the file by
+// that name and fails: a backward seek can't restart the demo, and the duration
+// estimate can't count its records.
+static char		cl_wasmDemoName[MAX_OSPATH] = { 0 };
+
 // Records already consumed when the first snapshot landed. Everything before it
 // -- the gamestate and the configstrings -- carries no time, and counting those
 // against the elapsed clock is what makes an early rate estimate too slow.
@@ -65,16 +73,16 @@ static int CL_WasmCountDemoRecords( void ) {
 	char			name[MAX_OSPATH];
 	int				seq, len, count = 0;
 
-	if ( !clc.demoName[0] ) {
+	if ( !cl_wasmDemoName[0] ) {
 		return -1;
 	}
-	Com_sprintf( name, sizeof( name ), "demos/%s.dm_15", clc.demoName );
+	Com_sprintf( name, sizeof( name ), "demos/%s.dm_15", cl_wasmDemoName );
 	FS_FOpenFileRead( name, &f, qtrue );
 	if ( !f ) {
-		Com_sprintf( name, sizeof( name ), "demos/%s.dm_16", clc.demoName );
+		Com_sprintf( name, sizeof( name ), "demos/%s.dm_16", cl_wasmDemoName );
 		FS_FOpenFileRead( name, &f, qtrue );
 		if ( !f ) {
-			Com_sprintf( name, sizeof( name ), "demos/%s", clc.demoName );
+			Com_sprintf( name, sizeof( name ), "demos/%s", cl_wasmDemoName );
 			FS_FOpenFileRead( name, &f, qtrue );
 			if ( !f ) {
 				return -1;
@@ -349,7 +357,7 @@ EMSCRIPTEN_KEEPALIVE int JKD_SeekTo( int targetTime ) {
 		// message before it -- so the demo restarts and replays from the top.
 		// Queued through the command buffer so the teardown, which rebuilds
 		// cgame, happens between frames rather than under this call.
-		Cbuf_ExecuteText( EXEC_APPEND, va( "demo \"%s\"\n", clc.demoName ) );
+		Cbuf_ExecuteText( EXEC_APPEND, va( "demo \"%s\"\n", cl_wasmDemoName ) );
 	}
 	return -1;
 }
@@ -1040,6 +1048,8 @@ void CL_PlayDemo_f( void ) {
 	// mark a backward seek was launched from is deliberately kept.
 	cl_wasmRecordsRead = 0;
 	cl_wasmFirstRecordIndex = -1;
+	// taken from arg, not clc.demoName, which has already been truncated by now
+	Q_strncpyz( cl_wasmDemoName, arg, sizeof( cl_wasmDemoName ) );
 #endif
 
 	Con_Close();
@@ -2873,6 +2883,14 @@ void CL_Frame ( int msec ) {
 		// silently becoming a game client sitting on the main menu.
 		if ( !cl_wasmReportedStop ) {
 			cl_wasmReportedStop = qtrue;
+			// Abandon any seek in flight. A backward seek restarts the demo, and
+			// if that restart fails there is nothing left to seek through -- the
+			// pending target would otherwise stay set forever and the page would
+			// sit on "seeking..." with no way out.
+			if ( cl_wasmPendingSeek >= 0 ) {
+				cl_wasmPendingSeek = -1;
+				EM_ASM( { if (window.JKD_seekDone) { window.JKD_seekDone(); } } );
+			}
 			// Hand back the length we now know for certain, so a scrubber that
 			// was working from a guess can correct itself.
 			EM_ASM( {
