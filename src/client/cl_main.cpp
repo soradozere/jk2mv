@@ -1382,6 +1382,16 @@ void CL_PlayDemo_f( void ) {
 	if ( Q_stricmp( arg, cl_wasmDemoName ) ) {
 		cl_wasmFirstDemoTime = 0;
 		cl_wasmFinalDemoTime = 0;
+		/*
+		And the record count, which is counted once and then cached forever.
+		Left alone, every demo opened after the first has its length estimated
+		against the *first* one's record count -- so switching to a shorter
+		recording from the sidebar showed a timeline far longer than the demo,
+		and a longer one showed a bar that ran out early. Only wrong across a
+		change of file: re-opening the same demo, which is how a backward seek
+		works, is counting the same records again.
+		*/
+		cl_wasmTotalRecords = -1;
 	}
 	// taken from arg, not clc.demoName, which has already been truncated by now
 	Q_strncpyz( cl_wasmDemoName, arg, sizeof( cl_wasmDemoName ) );
