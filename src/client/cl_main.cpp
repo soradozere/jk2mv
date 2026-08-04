@@ -330,6 +330,12 @@ static int	cl_wasmSeekWasFrozen = 0;
 // everything around here sits inside an extern "C" block for the JS exports.
 extern "C++" qboolean CL_GetServerCommand( int serverCommandNumber );
 
+// Same reason, but these live further down this same file: trimming drives the
+// recorder directly rather than through the command buffer, because it has to
+// finish inside one call rather than over several frames.
+extern "C++" void CL_Record_f( void );
+extern "C++" void CL_StopRecord_f( void );
+
 /*
 Apply the reliable commands a seek has just skimmed past, and throw the text away.
 
@@ -458,6 +464,202 @@ EMSCRIPTEN_KEEPALIVE int JKD_SeekTo( int targetTime ) {
 // rather than appear to have ignored the drag.
 EMSCRIPTEN_KEEPALIVE int JKD_IsSeeking( void ) {
 	return cl_wasmPendingSeek >= 0 ? 1 : 0;
+}
+
+/*
+The trim's output file.
+
+Kept apart from clc.demofile on purpose. That field is the *source* demo's read
+handle while a demo is playing, and CL_Record_f overwrites it with the handle it
+opens for writing -- which during playback silently swaps the file being read
+for the file being written, so the next read hits the end of a file containing
+only what we just put in it and playback tears itself down. In a live game there
+is no demo open for reading and the clash never happens.
+
+Non-zero only while a trim is running; that doubles as the "are we trimming"
+flag, so the recorder's own clc.demorecording is left out of it entirely.
+*/
+static fileHandle_t cl_wasmTrimFile = 0;
+
+// Append one message to the trim, in the demo format: sequence, length, body.
+static void CL_WasmWriteTrimMessage( msg_t *msg ) {
+	int		len, swlen;
+
+	if ( !cl_wasmTrimFile ) {
+		return;
+	}
+	swlen = LittleLong( clc.serverMessageSequence );
+	FS_Write( &swlen, 4, cl_wasmTrimFile );
+	len = msg->cursize;
+	swlen = LittleLong( len );
+	FS_Write( &swlen, 4, cl_wasmTrimFile );
+	FS_Write( msg->data, len, cl_wasmTrimFile );
+}
+
+/*
+====================
+CL_WasmWriteBaselineSnapshot
+
+Write the current snapshot into the recording as an *uncompressed* frame.
+
+This is what makes a cut from the middle of a demo playable, and it is the only
+part of trimming that is not just copying bytes. Every snapshot in a demo is
+delta-compressed against the one before it, so a file that begins partway
+through opens with a frame whose reference does not exist -- "Delta from
+invalid frame", and nothing renders. A live client never hits this: it asks the
+server for a non-delta frame and waits (clc.demowaiting) until one arrives.
+There is no server to ask here, so the frame has to be manufactured.
+
+The state to write is already sitting in cl.snap, reconstructed by the seek
+that got us here. Entities are delta'd from cl.entityBaselines rather than from
+nothing, because that is what the reader does when there is no previous frame
+(see CL_ParsePacketEntities with a NULL oldframe) -- and CL_Record_f has
+already written those baselines into the gamestate ahead of us.
+
+The record carries cl.snap.messageNum as its sequence, deliberately: the next
+message copied out of the source demo deltas against that number, so keeping it
+means the chain still resolves in the new file.
+====================
+*/
+static void CL_WasmWriteBaselineSnapshot( void ) {
+	byte		bufData[MAX_MSGLEN];
+	msg_t		buf;
+	entityState_t	*ent;
+	int			i, len, swlen;
+
+	if ( !cl_wasmTrimFile || !cl.snap.valid ) {
+		return;
+	}
+
+	MSG_Init( &buf, bufData, sizeof( bufData ) );
+	MSG_Bitstream( &buf );
+
+	// Every server-to-client message opens with the reliable acknowledge.
+	MSG_WriteLong( &buf, clc.reliableSequence );
+
+	MSG_WriteByte( &buf, svc_snapshot );
+	MSG_WriteLong( &buf, cl.snap.serverTime );
+	MSG_WriteByte( &buf, 0 );		// deltaNum 0 -- this frame stands alone
+	MSG_WriteByte( &buf, cl.snap.snapFlags );
+	MSG_WriteByte( &buf, sizeof( cl.snap.areamask ) );
+	MSG_WriteData( &buf, cl.snap.areamask, sizeof( cl.snap.areamask ) );
+
+	MSG_WriteDeltaPlayerstate( &buf, NULL, &cl.snap.ps );
+
+	// Ascending entity order, which is what the reader walks.
+	for ( i = 0; i < cl.snap.numEntities; i++ ) {
+		ent = &cl.parseEntities[ ( cl.snap.parseEntitiesNum + i ) & ( MAX_PARSE_ENTITIES - 1 ) ];
+		MSG_WriteDeltaEntity( &buf, &cl.entityBaselines[ ent->number ], ent, qtrue );
+	}
+	MSG_WriteBits( &buf, MAX_GENTITIES - 1, GENTITYNUM_BITS );	// end of list
+
+	MSG_WriteByte( &buf, svc_EOF );
+
+	swlen = LittleLong( cl.snap.messageNum );
+	FS_Write( &swlen, 4, cl_wasmTrimFile );
+	len = buf.cursize;
+	swlen = LittleLong( len );
+	FS_Write( &swlen, 4, cl_wasmTrimFile );
+	FS_Write( buf.data, len, cl_wasmTrimFile );
+}
+
+/*
+====================
+JKD_TrimDemo
+
+Cut from wherever playback currently sits up to endMs, into a new file, and
+report its size so the page can read it back out of the virtual filesystem.
+
+**The caller must seek to the in-point first**, and let that seek finish. This
+does not do it, deliberately. Seeking backwards restarts the demo, which tears
+down and rebuilds cgame -- safe between frames, which is why JKD_SeekTo queues
+it through the command buffer, and not safe underneath a call arriving from JS.
+Doing it here crashed the engine on setjmp/longjmp. The page already has a
+frame-sliced seek that does this correctly, so it seeks, waits, then trims.
+
+The cut itself runs at seek speed rather than playback speed: nothing is being
+painted, so it is just a read loop with the recorder hooked up.
+
+Leaves playback sitting at the end point. The page is expected to put the
+viewer back where it wants it afterwards.
+
+Returns the file size in bytes, or a negative value on failure.
+====================
+*/
+EMSCRIPTEN_KEEPALIVE int JKD_TrimDemo( int endMs, const char *outName ) {
+	int		base, endTime, size, guard, swlen;
+	fileHandle_t	src;
+
+	if ( !clc.demoplaying || !clc.demofile || !cl.snap.valid ) {
+		return -1;
+	}
+	if ( clc.demorecording ) {
+		return -2;		// one at a time
+	}
+	if ( cl_wasmPendingSeek >= 0 ) {
+		return -3;		// mid-seek: the in-point is not settled yet
+	}
+	if ( !outName || !outName[0] ) {
+		return -4;
+	}
+
+	// The page counts from the demo's first frame; the engine works in absolute
+	// server time. JKD_GetElapsedTime is that same difference in reverse.
+	base = cl.snap.serverTime - JKD_GetElapsedTime();
+	endTime = base + endMs;
+	if ( endTime <= cl.snap.serverTime ) {
+		return -5;		// the out-point is behind us
+	}
+
+	/*
+	Borrow CL_Record_f for the gamestate it writes -- configstrings and entity
+	baselines, from the state the seek left us in -- then take the file back off
+	it. It parks its output in clc.demofile, which is where the demo we are
+	reading lives, so leaving it there swaps the source out from under the read
+	loop. Save the source, let it write, then put the source back and keep the
+	output handle somewhere it cannot collide.
+	*/
+	src = clc.demofile;
+	Cmd_TokenizeString( va( "record %s", outName ) );
+	CL_Record_f();
+	if ( !clc.demorecording || clc.demofile == src ) {
+		clc.demofile = src;
+		return -7;
+	}
+	cl_wasmTrimFile = clc.demofile;
+	clc.demofile = src;
+	// Nothing below goes through the engine's own recorder, so it should not
+	// think one is running -- a disconnect would try to close it via the field
+	// we have just taken back.
+	clc.demorecording = qfalse;
+	clc.demowaiting = qfalse;
+
+	// The manufactured frame every copied message will delta against.
+	CL_WasmWriteBaselineSnapshot();
+
+	// Everything from here to the out-point copies through the hook in
+	// CL_ReadDemoMessage.
+	guard = 0;
+	while ( cl.snap.serverTime < endTime && clc.demofile && cl_wasmTrimFile ) {
+		int before = cl.snap.serverTime;
+		CL_ReadDemoMessage();
+		if ( cl.snap.serverTime == before && ++guard > 64 ) {
+			break;
+		}
+		if ( cl.snap.serverTime != before ) {
+			guard = 0;
+		}
+	}
+
+	// A demo ends on two -1 length markers.
+	swlen = -1;
+	FS_Write( &swlen, 4, cl_wasmTrimFile );
+	FS_Write( &swlen, 4, cl_wasmTrimFile );
+	FS_FCloseFile( cl_wasmTrimFile );
+	cl_wasmTrimFile = 0;
+
+	size = FS_ReadFile( va( "demos/%s.dm_%d", outName, MV_GetCurrentProtocol() ), NULL );
+	return size;
 }
 
 // Is the recording client watching someone else, or playing? PMF_FOLLOW is how
@@ -1056,6 +1258,14 @@ void CL_ReadDemoMessage( void ) {
 	cl_wasmRecordsRead++;
 #endif
 	CL_ParseServerMessage( &buf );
+
+#ifdef __EMSCRIPTEN__
+	// Copy the message straight through to a trim in progress. The network path
+	// does this in CL_PacketEvent; the playback path never did, because
+	// recording while watching a demo is not something the game itself wants to
+	// do. Trimming is exactly that.
+	CL_WasmWriteTrimMessage( &buf );
+#endif
 
 #ifdef __EMSCRIPTEN__
 	// Take the rate baseline here, at the record the first snapshot arrives on,
