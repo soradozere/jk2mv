@@ -3456,6 +3456,33 @@ static void CL_WasmCenterPrint_f( void ) {
 		}
 	}, Cmd_Argv( 1 ) );
 }
+
+/*
+====================
+CL_WasmFeed_f
+
+Hands the page one line of the kill feed: jkd_feed "<text>".
+
+The top-left feed a viewer wants is two things the game prints to the same
+console: obituaries ("thrown to their doom by"), and the CTF messages that say
+who took, returned or capped the flag. Chat lands in that console too, and is
+not wanted here -- so this is fed from those specific call sites rather than by
+tapping the console, which means chat is excluded by construction instead of by
+a filter that has to keep guessing right.
+
+Colour codes are left in; the page strips them, the same as centre prints.
+====================
+*/
+static void CL_WasmFeed_f( void ) {
+	if ( Cmd_Argc() < 2 ) {
+		return;
+	}
+	EM_ASM( {
+		if ( window.JKD_onFeed ) {
+			window.JKD_onFeed( UTF8ToString( $0 ) );
+		}
+	}, Cmd_Argv( 1 ) );
+}
 #endif
 
 /*
@@ -3638,6 +3665,7 @@ void CL_Init( void ) {
 #ifdef __EMSCRIPTEN__
 	Cmd_AddCommand ("jkd_obituary", CL_WasmObituary_f);
 	Cmd_AddCommand ("jkd_centerprint", CL_WasmCenterPrint_f);
+	Cmd_AddCommand ("jkd_feed", CL_WasmFeed_f);
 #endif
 
 	CL_InitRef();
