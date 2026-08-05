@@ -1,0 +1,167 @@
+name: Camera Control Test (Gate step 3)
+
+# Does a render .cfg alone drive the camera, or does the fork need a second
+# entry point beside its JKD_* Emscripten exports?
+#
+# The browser viewer sets camera state purely through cvars (Soracle's
+# jkd-client.ts setCameraMode/setFollow/setThirdPersonAngle), and the native
+# build compiles the fork's own cgame to cgame_amd64.so -- so those cvars
+# should exist here too. This proves or disproves that empirically.
+#
+# Four short passes isolating one control each:
+#   A recorder POV        vs B chase client 0  -> camera MODE works
+#   B chase angle 0       vs C chase angle 180 -> chase ANGLE works
+#   B follow client 0     vs D follow client 1 -> POV TARGET works
+#
+# workflow_dispatch only.
+on:
+  workflow_dispatch:
+
+env:
+  ASSET_VERSION: "20260805"
+  R2_PUBLIC: "https://pub-76bff0ef02794a5d95b7e2a8b8660f61.r2.dev"
+  # Short passes: enough to see framing, cheap enough to run four of them.
+  CAPTURE_FRAMES: "300"
+  FPS: "30"
+
+jobs:
+  cameras:
+    name: Render four camera configurations
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out the engine
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+          path: jk2mv
+
+      - name: Install build + render dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake \
+            libsdl2-dev libgl1-mesa-dev libopenal-dev libjpeg-dev libpng-dev libminizip-dev \
+            xvfb libgl1-mesa-dri ffmpeg
+
+      - name: Build engine
+        run: |
+          cmake -S jk2mv -B jk2mv/build/actions \
+            -DCMAKE_BUILD_TYPE=Release -DUseInternalLibs=OFF -DBuildPortableVersion=ON
+          cmake --build jk2mv/build/actions -j"$(nproc)"
+
+      - name: Resolve game root
+        id: root
+        run: echo "ROOT=$GITHUB_WORKSPACE/jk2mv/build/actions/out/Release" >> "$GITHUB_OUTPUT"
+
+      - name: Restore game assets from cache
+        id: assetcache
+        uses: actions/cache@v4
+        with:
+          path: assets/base-min.tar
+          key: jk2-assets-${{ env.ASSET_VERSION }}
+
+      - name: Download game assets
+        if: steps.assetcache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p assets
+          curl -fsSL -o assets/base-min.tar "$R2_PUBLIC/render-assets/$ASSET_VERSION/base-min.tar"
+
+      - name: Stage assets into the game root
+        env:
+          ROOT: ${{ steps.root.outputs.ROOT }}
+        run: |
+          mkdir -p "$ROOT/base/demos"
+          tar -xf assets/base-min.tar -C "$ROOT/base"
+          curl -fsSL -o "$ROOT/base/demos/gate-demo.dm_15" \
+            "$R2_PUBLIC/render-assets/$ASSET_VERSION/gate-demo.dm_15"
+
+      - name: Render camera matrix
+        timeout-minutes: 30
+        env:
+          ROOT: ${{ steps.root.outputs.ROOT }}
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          SDL_AUDIODRIVER: "dummy"
+        run: |
+          set -u
+          render_pass () {
+            NAME="$1"; DEMOCAM="$2"; FOLLOW="$3"; THIRD="$4"; ANGLE="$5"; RANGE="$6"
+
+            # Camera cvars are set AFTER the demo is up. They belong to cgame,
+            # which does not exist until the map loads; setting them earlier
+            # relies on cgame adopting pre-created cvar values, which is not
+            # worth depending on when a second wait costs nothing.
+            cat > "$ROOT/base/cam-$NAME.cfg" <<EOF
+          set com_hunkMegs 256
+          set r_mode -1
+          set r_customwidth 1280
+          set r_customheight 720
+          set r_fullscreen 0
+          set r_swapInterval 0
+          set s_useOpenAL 0
+          set s_volume 0.8
+          set cl_aviFrameRate $FPS
+          set cl_aviMotionJpeg 1
+          set cl_aviMotionJpegQuality 90
+          set cg_draw2D 0
+          set con_notifytime 0
+          set cl_noprint 1
+
+          demo gate-demo
+          wait 200
+          set cg_demoCam $DEMOCAM
+          set cg_demoFollow $FOLLOW
+          set cg_thirdPerson $THIRD
+          set cg_thirdPersonAngle $ANGLE
+          set cg_thirdPersonRange $RANGE
+          set cg_cameraOrbit 0
+          wait 30
+          video cam-$NAME
+          wait $CAPTURE_FRAMES
+          stopvideo
+          quit
+          EOF
+
+            echo "::group::pass $NAME (demoCam=$DEMOCAM follow=$FOLLOW third=$THIRD angle=$ANGLE range=$RANGE)"
+            START=$(date +%s)
+            xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" \
+              "$ROOT/jk2mvmp" \
+              +set fs_basepath "$ROOT" +set fs_homepath "$ROOT" \
+              +exec "cam-$NAME.cfg" 2>&1 | grep -iE "demoFollow|demoCam|thirdPerson|wrote|avi|ERROR" | tail -12 || true
+            echo "pass $NAME took $(( $(date +%s) - START ))s"
+            echo "::endgroup::"
+          }
+
+          #            name          demoCam follow third angle range
+          render_pass  A-recorder     0      -1     0     0     80
+          render_pass  B-chase-c0     0       0     1     0     80
+          render_pass  C-front-c0     0       0     1   180     80
+          render_pass  D-chase-c1     0       1     1     0     80
+
+          echo "=== AVIs produced ==="
+          ls -la "$ROOT/base/"*.avi 2>/dev/null || find "$ROOT" -name "*.avi"
+
+      - name: Extract comparison frames
+        env:
+          ROOT: ${{ steps.root.outputs.ROOT }}
+        run: |
+          mkdir -p out
+          for AVI in "$ROOT/base/"*.avi; do
+            [ -e "$AVI" ] || continue
+            NAME=$(basename "$AVI" .avi)
+            # Two frames apart in time, so a static camera is distinguishable
+            # from a tracking one.
+            ffmpeg -y -ss 3 -i "$AVI" -frames:v 1 "out/${NAME}-t3.jpg" 2>/dev/null || true
+            ffmpeg -y -ss 8 -i "$AVI" -frames:v 1 "out/${NAME}-t8.jpg" 2>/dev/null || true
+            ffmpeg -y -i "$AVI" -c:v libx264 -pix_fmt yuv420p -crf 26 -preset veryfast \
+              -c:a aac -b:a 96k "out/${NAME}.mp4" 2>/dev/null || true
+          done
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: camera-test-output
+          path: out/
+          retention-days: 3
+          if-no-files-found: warn
