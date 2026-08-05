@@ -146,8 +146,9 @@ jobs:
           ROOT: ${{ steps.root.outputs.ROOT }}
         run: |
           mkdir -p out
-          for AVI in "$ROOT/base/"*.avi; do
-            [ -e "$AVI" ] || continue
+          # The engine writes captures to base/videos/, not base/ -- find rather
+          # than glob, so a future path change does not silently yield nothing.
+          find "$ROOT" -name "*.avi" -print0 | while IFS= read -r -d '' AVI; do
             NAME=$(basename "$AVI" .avi)
             # Two frames apart in time, so a static camera is distinguishable
             # from a tracking one.
