@@ -35,7 +35,7 @@ jobs:
       - name: Check out the engine
         uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: true   # jk2mvmenu is built from the mvsdk submodule
           fetch-depth: 0
           path: jk2mv
 
@@ -47,6 +47,25 @@ jobs:
             libsdl2-dev libgl1-mesa-dev libopenal-dev libjpeg-dev libpng-dev libminizip-dev \
             xvfb libgl1-mesa-dri \
             ffmpeg
+
+      # Build first: its output directory IS the game root. A portable build
+      # emits jk2mvmp, jk2mvmenu_<arch>.so and base/assetsmv.pk3 into
+      # out/Release, and the engine needs all three alongside the retail-ish
+      # pk3s. Staging assets anywhere else orphans the menu module and
+      # assetsmv.pk3, which is what killed the previous run.
+      - name: Build engine
+        run: |
+          cmake -S jk2mv -B jk2mv/build/actions \
+            -DCMAKE_BUILD_TYPE=Release -DUseInternalLibs=OFF -DBuildPortableVersion=ON
+          cmake --build jk2mv/build/actions -j"$(nproc)"
+
+      - name: Resolve game root
+        id: root
+        run: |
+          ROOT="$GITHUB_WORKSPACE/jk2mv/build/actions/out/Release"
+          echo "ROOT=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "=== build output layout ==="
+          find "$ROOT" -maxdepth 2 | head -40
 
       # ~121MB. Re-downloading it every run is the single biggest lever on job
       # duration, so cache it and key on the version prefix.
@@ -64,37 +83,24 @@ jobs:
           curl -fsSL -o assets/base-min.tar \
             "$R2_PUBLIC/render-assets/$ASSET_VERSION/base-min.tar"
 
-      - name: Stage GameData
+      - name: Stage assets into the game root
+        env:
+          ROOT: ${{ steps.root.outputs.ROOT }}
         run: |
-          mkdir -p GameData/base/demos
-          tar -xf assets/base-min.tar -C GameData/base
+          mkdir -p "$ROOT/base/demos"
+          tar -xf assets/base-min.tar -C "$ROOT/base"
           # The gate uses a known-good clip on a map present in base-min.
           # Production fetches the trimmed demo from the demos/ prefix instead.
-          curl -fsSL -o "GameData/base/demos/gate-demo.dm_15" \
+          curl -fsSL -o "$ROOT/base/demos/gate-demo.dm_15" \
             "$R2_PUBLIC/render-assets/$ASSET_VERSION/gate-demo.dm_15"
-          ls -la GameData/base GameData/base/demos
-
-      - name: Build engine
-        run: |
-          cmake -S jk2mv -B jk2mv/build/actions \
-            -DCMAKE_BUILD_TYPE=Release -DUseInternalLibs=OFF -DBuildPortableVersion=ON
-          cmake --build jk2mv/build/actions -j"$(nproc)"
-
-      - name: Locate built binary
-        id: bin
-        run: |
-          # Client target is jk2mvmp (CMakeLists.txt: set(MVMP "jk2mvmp")).
-          BIN=$(find jk2mv/build/actions -type f -executable -name "jk2mvmp*" ! -name "*.so" | head -1)
-          if [ -z "$BIN" ]; then
-            echo "No jk2mvmp binary found; build tree was:" >&2
-            find jk2mv/build/actions -type f -executable | head -50
-            exit 1
-          fi
-          echo "BIN=$(realpath "$BIN")" >> "$GITHUB_OUTPUT"
+          echo "=== game root now ==="
+          ls -la "$ROOT" "$ROOT/base"
 
       - name: Write render config
+        env:
+          ROOT: ${{ steps.root.outputs.ROOT }}
         run: |
-          cat > GameData/base/render.cfg <<EOF
+          cat > "$ROOT/base/render.cfg" <<EOF
           set com_hunkMegs 256
 
           // Software GL under xvfb -- windowed, no vsync pacing.
@@ -109,7 +115,8 @@ jobs:
           // the render comes out silent, so this is mandatory, not taste.
           set s_useOpenAL 0
           set s_initsound 1
-          set s_volume 0.8
+          set s_volume 1
+          set s_musicvolume 0.3
 
           set cl_aviFrameRate ${{ inputs.fps }}
           set cl_aviMotionJpeg 1
@@ -130,33 +137,39 @@ jobs:
           wait 200
           video render-gate1
           EOF
-          cat GameData/base/render.cfg
+          cat "$ROOT/base/render.cfg"
 
       - name: Render headless under xvfb
         timeout-minutes: 30
         env:
+          ROOT: ${{ steps.root.outputs.ROOT }}
           LIBGL_ALWAYS_SOFTWARE: "1"   # llvmpipe, not the runner's absent GPU
           SDL_AUDIODRIVER: "dummy"     # no sound card; DMA mixer still needs a device
         run: |
           START=$(date +%s)
           xvfb-run --auto-servernum --server-args="-screen 0 ${{ inputs.width }}x${{ inputs.height }}x24" \
-            "${{ steps.bin.outputs.BIN }}" \
-            +set fs_basepath "$GITHUB_WORKSPACE/GameData" \
-            +set fs_homepath "$GITHUB_WORKSPACE/GameData" \
+            "$ROOT/jk2mvmp" \
+            +set fs_basepath "$ROOT" \
+            +set fs_homepath "$ROOT" \
             +set logfile 2 \
-            +exec render.cfg 2>&1 | tail -100 || true
+            +exec render.cfg 2>&1 | tail -120 || true
           echo "=== RENDER WALL-CLOCK: $(( $(date +%s) - START ))s ==="
 
       - name: Show engine log
         if: always()
+        env:
+          ROOT: ${{ steps.root.outputs.ROOT }}
         run: |
-          LOG=$(find GameData -iname "qconsole.log" | head -1)
-          if [ -n "$LOG" ]; then cp "$LOG" qconsole.log; tail -120 qconsole.log; else echo "no qconsole.log"; fi
+          LOG=$(find "$ROOT" -iname "qconsole.log" | head -1)
+          if [ -n "$LOG" ]; then cp "$LOG" qconsole.log; tail -150 qconsole.log; else echo "no qconsole.log"; fi
+          find "$GITHUB_WORKSPACE" -maxdepth 2 -name "errorlog-*.txt" -exec cat {} \; || true
 
       - name: Find AVI output
         id: avi
+        env:
+          ROOT: ${{ steps.root.outputs.ROOT }}
         run: |
-          AVI=$(find GameData -iname "*.avi" | head -1)
+          AVI=$(find "$ROOT" -iname "*.avi" | head -1)
           if [ -z "$AVI" ]; then
             echo "No AVI produced -- render failed" >&2
             exit 1
@@ -176,7 +189,7 @@ jobs:
           ls -la render-gate1.mp4
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1 render-gate1.mp4
           # Prove the audio track is not just present but non-silent.
-          echo "=== AUDIO LEVELS (mean_volume of -91dB means silence) ==="
+          echo "=== AUDIO LEVELS (mean_volume near -91dB means silence) ==="
           ffmpeg -i render-gate1.mp4 -af volumedetect -f null /dev/null 2>&1 | grep -E "volume|Stream" || true
 
       - name: Grab still frames
