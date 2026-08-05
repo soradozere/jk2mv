@@ -481,13 +481,56 @@ flag, so the recorder's own clc.demorecording is left out of it entirely.
 */
 static fileHandle_t cl_wasmTrimFile = 0;
 
-// Append one message to the trim, in the demo format: sequence, length, body.
-static void CL_WasmWriteTrimMessage( msg_t *msg ) {
+/*
+The messageNum of the first snapshot written into the trim.
+
+Anything a copied frame deltas from that is older than this is not in the new
+file, so it cannot be copied as-is -- see CL_WasmWriteTrimMessage.
+*/
+static int		cl_wasmTrimFirstMessage = 0;
+
+static void CL_WasmWriteStandaloneSnapshot( int firstCommand, int lastCommand );
+
+/*
+Append one message to the trim, in the demo format: sequence, length, body.
+
+Most messages copy through untouched, but not all of them can. Every snapshot
+is delta-compressed against an earlier one, and how much earlier is the
+recording client's ping measured in snapshots: a demo the bot records next to
+the server deltas one message back, while a player on a hundred milliseconds
+deltas ten or more. A cut that begins partway through therefore opens with a
+run of frames whose reference frames are on the far side of the in-point, and
+CL_ParseSnapshot drops a frame it cannot resolve *without storing it*, so the
+frame that later deltas from that one fails too. One missing reference takes
+the whole clip with it.
+
+So for as long as this demo's frames still reach back past the cut, the frame
+is rewritten as a standalone one rather than copied. That window is the ping,
+typically ten frames and never more than PACKET_BACKUP, after which every
+reference lands inside the new file and copying is safe again.
+
+`firstCommand`..`lastCommand` are the server commands that arrived in this
+message; a rewritten frame has to carry them itself, since the bytes they came
+in are the bytes being replaced.
+*/
+static void CL_WasmWriteTrimMessage( msg_t *msg, int firstCommand, int lastCommand ) {
 	int		len, swlen;
+	qboolean	carriesSnapshot;
 
 	if ( !cl_wasmTrimFile ) {
 		return;
 	}
+
+	// cl.snap only moved if this message actually held a snapshot; one carrying
+	// nothing but server commands leaves the previous frame's numbers in place,
+	// and those have already been dealt with.
+	carriesSnapshot = (qboolean)( cl.snap.valid && cl.snap.messageNum == clc.serverMessageSequence );
+
+	if ( carriesSnapshot && cl.snap.deltaNum > 0 && cl.snap.deltaNum < cl_wasmTrimFirstMessage ) {
+		CL_WasmWriteStandaloneSnapshot( firstCommand, lastCommand );
+		return;
+	}
+
 	swlen = LittleLong( clc.serverMessageSequence );
 	FS_Write( &swlen, 4, cl_wasmTrimFile );
 	len = msg->cursize;
@@ -498,17 +541,17 @@ static void CL_WasmWriteTrimMessage( msg_t *msg ) {
 
 /*
 ====================
-CL_WasmWriteBaselineSnapshot
+CL_WasmWriteStandaloneSnapshot
 
 Write the current snapshot into the recording as an *uncompressed* frame.
 
 This is what makes a cut from the middle of a demo playable, and it is the only
 part of trimming that is not just copying bytes. Every snapshot in a demo is
-delta-compressed against the one before it, so a file that begins partway
-through opens with a frame whose reference does not exist -- "Delta from
-invalid frame", and nothing renders. A live client never hits this: it asks the
-server for a non-delta frame and waits (clc.demowaiting) until one arrives.
-There is no server to ask here, so the frame has to be manufactured.
+delta-compressed against an earlier one, so a file that begins partway through
+opens with a frame whose reference does not exist -- "Delta from invalid
+frame", and nothing renders. A live client never hits this: it asks the server
+for a non-delta frame and waits (clc.demowaiting) until one arrives. There is
+no server to ask here, so the frame has to be manufactured.
 
 The state to write is already sitting in cl.snap, reconstructed by the seek
 that got us here. Entities are delta'd from cl.entityBaselines rather than from
@@ -516,12 +559,19 @@ nothing, because that is what the reader does when there is no previous frame
 (see CL_ParsePacketEntities with a NULL oldframe) -- and CL_Record_f has
 already written those baselines into the gamestate ahead of us.
 
-The record carries cl.snap.messageNum as its sequence, deliberately: the next
-message copied out of the source demo deltas against that number, so keeping it
-means the chain still resolves in the new file.
+The record carries cl.snap.messageNum as its sequence, deliberately: the
+messages copied out of the source demo delta against those numbers, so keeping
+them means the chain still resolves in the new file.
+
+Called once for the frame at the in-point, and then again for every frame that
+still reaches back past it -- see CL_WasmWriteTrimMessage, which is where the
+"how far back does this demo delta" problem is explained. `firstCommand` and
+`lastCommand` are a range of clc.serverCommands to emit ahead of the frame,
+inclusive and possibly empty: a rewritten frame replaces the message its own
+commands arrived in, so it has to carry them.
 ====================
 */
-static void CL_WasmWriteBaselineSnapshot( void ) {
+static void CL_WasmWriteStandaloneSnapshot( int firstCommand, int lastCommand ) {
 	byte		bufData[MAX_MSGLEN];
 	msg_t		buf;
 	entityState_t	*ent;
@@ -536,6 +586,21 @@ static void CL_WasmWriteBaselineSnapshot( void ) {
 
 	// Every server-to-client message opens with the reliable acknowledge.
 	MSG_WriteLong( &buf, clc.reliableSequence );
+
+	/*
+	Commands first, which is the order the reader expects: CL_ParseSnapshot
+	stamps the frame with whatever clc.serverCommandSequence has reached by the
+	time it runs, and a frame that claims commands it was written before would
+	hand cgame the wrong scores and a kill message out of order.
+	*/
+	for ( i = firstCommand; i <= lastCommand; i++ ) {
+		if ( i <= 0 ) {
+			continue;
+		}
+		MSG_WriteByte( &buf, svc_serverCommand );
+		MSG_WriteLong( &buf, i );
+		MSG_WriteString( &buf, clc.serverCommands[ i & ( MAX_RELIABLE_COMMANDS - 1 ) ] );
+	}
 
 	MSG_WriteByte( &buf, svc_snapshot );
 	MSG_WriteLong( &buf, cl.snap.serverTime );
@@ -554,6 +619,13 @@ static void CL_WasmWriteBaselineSnapshot( void ) {
 	MSG_WriteBits( &buf, MAX_GENTITIES - 1, GENTITYNUM_BITS );	// end of list
 
 	MSG_WriteByte( &buf, svc_EOF );
+
+	// Where the new file starts, which is the line everything after this is
+	// measured against: a frame deltaing from anything older is deltaing from
+	// something that is not here.
+	if ( !cl_wasmTrimFirstMessage ) {
+		cl_wasmTrimFirstMessage = cl.snap.messageNum;
+	}
 
 	swlen = LittleLong( cl.snap.messageNum );
 	FS_Write( &swlen, 4, cl_wasmTrimFile );
@@ -634,8 +706,10 @@ EMSCRIPTEN_KEEPALIVE int JKD_TrimDemo( int endMs, const char *outName ) {
 	clc.demorecording = qfalse;
 	clc.demowaiting = qfalse;
 
-	// The manufactured frame every copied message will delta against.
-	CL_WasmWriteBaselineSnapshot();
+	// The manufactured frame the file opens on. Frames after it that still reach
+	// back past this point get the same treatment, in CL_WasmWriteTrimMessage.
+	cl_wasmTrimFirstMessage = 0;
+	CL_WasmWriteStandaloneSnapshot( 0, -1 );
 
 	// Everything from here to the out-point copies through the hook in
 	// CL_ReadDemoMessage.
@@ -657,9 +731,27 @@ EMSCRIPTEN_KEEPALIVE int JKD_TrimDemo( int endMs, const char *outName ) {
 	FS_Write( &swlen, 4, cl_wasmTrimFile );
 	FS_FCloseFile( cl_wasmTrimFile );
 	cl_wasmTrimFile = 0;
+	cl_wasmTrimFirstMessage = 0;
 
 	size = FS_ReadFile( va( "demos/%s.dm_%d", outName, MV_GetCurrentProtocol() ), NULL );
 	return size;
+}
+
+/*
+Which generation of the cut this build implements.
+
+1 -- the original, one standalone frame at the in-point. Correct only for demos
+     whose frames delta a single message back, which in practice means the ones
+     the bot records beside the server. Anything recorded by a player with real
+     ping came out unplayable, and came out that way silently.
+2 -- standalone frames for as long as the delta window reaches past the cut.
+
+The page refuses to offer trimming to an engine that cannot answer this, which
+is precisely the engine that got it wrong. Bump it whenever an older build's
+output would be broken rather than merely bigger.
+*/
+EMSCRIPTEN_KEEPALIVE int JKD_TrimRevision( void ) {
+	return 2;
 }
 
 // Is the recording client watching someone else, or playing? PMF_FOLLOW is how
@@ -1212,6 +1304,9 @@ void CL_ReadDemoMessage( void ) {
 	msg_t		buf;
 	byte		bufData[ MAX_MSGLEN ];
 	int			s;
+#ifdef __EMSCRIPTEN__
+	int			commandsBefore;
+#endif
 
 	if ( !clc.demofile ) {
 		CL_DemoCompleted ();
@@ -1257,14 +1352,21 @@ void CL_ReadDemoMessage( void ) {
 	// to records in the file, without parsing the whole thing up front
 	cl_wasmRecordsRead++;
 #endif
+#ifdef __EMSCRIPTEN__
+	// Noted before the parse so the trim can tell which server commands arrived
+	// in *this* message: a frame it has to rewrite must carry its own.
+	commandsBefore = clc.serverCommandSequence;
+#endif
+
 	CL_ParseServerMessage( &buf );
 
 #ifdef __EMSCRIPTEN__
-	// Copy the message straight through to a trim in progress. The network path
-	// does this in CL_PacketEvent; the playback path never did, because
-	// recording while watching a demo is not something the game itself wants to
-	// do. Trimming is exactly that.
-	CL_WasmWriteTrimMessage( &buf );
+	// Hand the message to a trim in progress. The network path does this in
+	// CL_PacketEvent; the playback path never did, because recording while
+	// watching a demo is not something the game itself wants to do. Trimming is
+	// exactly that. After the parse, not before -- the decision about whether
+	// this message can be copied verbatim is made from the frame it produced.
+	CL_WasmWriteTrimMessage( &buf, commandsBefore + 1, clc.serverCommandSequence );
 #endif
 
 #ifdef __EMSCRIPTEN__

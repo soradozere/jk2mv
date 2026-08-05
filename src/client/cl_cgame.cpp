@@ -1639,7 +1639,20 @@ void CL_SetCGameTime( void ) {
 
 	if ( clc.demoplaying && cl_freezeDemo->integer ) {
 		// cl_freezeDemo is used to lock a demo in place for single frame advances
-
+#ifdef __EMSCRIPTEN__
+		/*
+		Keep the time base anchored while frozen. cls.realtime marches on every
+		frame regardless, and the moment the freeze lifts, serverTime is
+		recomputed as realtime + serverTimeDelta -- so a delta left alone turns
+		every paused second into a second of fast-forward, with the demo read
+		loop below chewing through the file to catch up. Rebasing the delta
+		each frozen frame means unpausing resumes from the frame the pause
+		landed on. It matters here in a way it never did for this cvar's
+		original single-frame-advance debugging use: the viewer's pause button
+		holds demos frozen for minutes at a time.
+		*/
+		cl.serverTimeDelta = cl.serverTime - cls.realtime;
+#endif
 	} else {
 		// cl_timeNudge is a user adjustable cvar that allows more
 		// or less latency to be added in the interest of better
