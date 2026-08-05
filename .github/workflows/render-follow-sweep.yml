@@ -1,0 +1,176 @@
+name: Follow Sweep (Gate step 3b)
+
+# Does cg_demoFollow actually retarget the camera from a .cfg?
+#
+# Two earlier attempts compared separate runs and got identical-looking frames.
+# That is not evidence of a broken cvar: CG_UpdateDemoFollow (cg_view.c) bails
+# to the recorded view when the requested client is not in the snapshot, so an
+# unoccupied slot is indistinguishable from a cvar that does nothing -- and
+# both attempts only probed slots 0-7 of MAX_CLIENTS=32.
+#
+# Separate runs also can't be compared cleanly: each one starts capture at a
+# slightly different demo moment, so frames differ from timing jitter alone.
+#
+# So: ONE continuous capture, stepping cg_demoFollow across every slot mid-
+# render. Same timeline throughout, so any abrupt view change is the cvar and
+# nothing else. Occupied slots will jump; empty ones will hold the fallback.
+on:
+  workflow_dispatch:
+
+env:
+  ASSET_VERSION: "20260805"
+  R2_PUBLIC: "https://pub-76bff0ef02794a5d95b7e2a8b8660f61.r2.dev"
+  FPS: "30"
+  # cbuf ticks twice per rendered frame, so 40 waits == 20 frames per slot.
+  WAITS_PER_SLOT: "40"
+  FRAMES_PER_SLOT: "20"
+  MAX_CLIENTS: "32"
+
+jobs:
+  sweep:
+    name: Step cg_demoFollow across all client slots
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+          path: jk2mv
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake \
+            libsdl2-dev libgl1-mesa-dev libopenal-dev libjpeg-dev libpng-dev libminizip-dev \
+            xvfb libgl1-mesa-dri ffmpeg
+
+      - name: Build engine
+        run: |
+          cmake -S jk2mv -B jk2mv/build/actions \
+            -DCMAKE_BUILD_TYPE=Release -DUseInternalLibs=OFF -DBuildPortableVersion=ON
+          cmake --build jk2mv/build/actions -j"$(nproc)"
+
+      - name: Resolve game root
+        id: root
+        run: echo "ROOT=$GITHUB_WORKSPACE/jk2mv/build/actions/out/Release" >> "$GITHUB_OUTPUT"
+
+      - name: Restore game assets from cache
+        id: assetcache
+        uses: actions/cache@v4
+        with:
+          path: assets/base-min.tar
+          key: jk2-assets-${{ env.ASSET_VERSION }}
+
+      - name: Download game assets
+        if: steps.assetcache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p assets
+          curl -fsSL -o assets/base-min.tar "$R2_PUBLIC/render-assets/$ASSET_VERSION/base-min.tar"
+
+      - name: Stage assets
+        env:
+          ROOT: ${{ steps.root.outputs.ROOT }}
+        run: |
+          mkdir -p "$ROOT/base/demos"
+          tar -xf assets/base-min.tar -C "$ROOT/base"
+          curl -fsSL -o "$ROOT/base/demos/gate-demo.dm_15" \
+            "$R2_PUBLIC/render-assets/$ASSET_VERSION/gate-demo.dm_15"
+
+      - name: Render one capture stepping through every slot
+        timeout-minutes: 30
+        env:
+          ROOT: ${{ steps.root.outputs.ROOT }}
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          SDL_AUDIODRIVER: "dummy"
+        run: |
+          CFG="$ROOT/base/sweep.cfg"
+          {
+            echo "set com_hunkMegs 256"
+            echo "set r_mode -1"
+            echo "set r_customwidth 1280"
+            echo "set r_customheight 720"
+            echo "set r_fullscreen 0"
+            echo "set r_swapInterval 0"
+            echo "set s_useOpenAL 0"
+            echo "set cl_aviFrameRate $FPS"
+            echo "set cl_aviMotionJpeg 1"
+            echo "set cl_aviMotionJpegQuality 90"
+            echo "set cg_draw2D 0"
+            echo "set cl_noprint 1"
+            echo ""
+            echo "demo gate-demo"
+            echo "wait 300"
+            echo "set cg_thirdPerson 1"
+            echo "set cg_thirdPersonRange 80"
+            echo "set cg_thirdPersonAngle 0"
+            echo "set cg_cameraOrbit 0"
+            echo "wait 30"
+            echo "video follow-sweep"
+            for C in $(seq 0 $(( MAX_CLIENTS - 1 ))); do
+              echo "set cg_demoFollow $C"
+              echo "wait $WAITS_PER_SLOT"
+            done
+            echo "stopvideo"
+            echo "quit"
+          } > "$CFG"
+          echo "=== cfg head ==="; head -25 "$CFG"
+
+          START=$(date +%s)
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" \
+            "$ROOT/jk2mvmp" \
+            +set fs_basepath "$ROOT" +set fs_homepath "$ROOT" \
+            +exec sweep.cfg 2>&1 | tail -15 || true
+          echo "=== sweep render took $(( $(date +%s) - START ))s ==="
+          find "$ROOT" -name "*.avi" -exec ls -la {} \;
+
+      - name: Extract one frame per slot
+        env:
+          ROOT: ${{ steps.root.outputs.ROOT }}
+        run: |
+          mkdir -p out
+          AVI=$(find "$ROOT" -name "follow-sweep.avi" | head -1)
+          [ -n "$AVI" ] || { echo "no capture produced" >&2; exit 1; }
+          ffprobe -v error -show_entries stream=codec_type,nb_frames,duration \
+            -of default=noprint_wrappers=1 "$AVI"
+
+          # -nostdin everywhere: ffmpeg otherwise eats the loop's stdin.
+          ffmpeg -nostdin -y -i "$AVI" -c:v libx264 -pix_fmt yuv420p -crf 24 \
+            -preset veryfast -an out/sweep.mp4 2>&1 | tail -2
+
+          # Sample the middle of each slot's window, so the frame is never taken
+          # on the boundary where the target has just changed.
+          for C in $(seq 0 $(( MAX_CLIENTS - 1 ))); do
+            T=$(awk -v c="$C" -v f="$FRAMES_PER_SLOT" -v fps="$FPS" \
+                 'BEGIN{printf "%.3f", (c*f + f/2)/fps}')
+            ffmpeg -nostdin -y -ss "$T" -i out/sweep.mp4 -frames:v 1 \
+              "$(printf 'out/slot-%02d.jpg' "$C")" 2>/dev/null || true
+          done
+          ls -la out/ | head -40
+
+      - name: Score each slot against its neighbours
+        run: |
+          # Objective rather than eyeballed: SSIM between consecutive slots.
+          # Within one continuous capture the scene changes only gradually, so
+          # a low score at slot N means the camera jumped -- i.e. slot N holds
+          # a real player and cg_demoFollow retargeted to them.
+          echo "slot  ssim_vs_previous" | tee ssim-report.txt
+          PREV=""
+          for F in $(ls out/slot-*.jpg 2>/dev/null | sort); do
+            if [ -n "$PREV" ]; then
+              S=$(ffmpeg -nostdin -i "$F" -i "$PREV" -lavfi ssim -f null - 2>&1 \
+                  | grep -o "All:[0-9.]*" | head -1 | cut -d: -f2)
+              echo "$(basename "$F" .jpg)  ${S:-n/a}" | tee -a ssim-report.txt
+            fi
+            PREV="$F"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: follow-sweep-output
+          path: |
+            out/
+            ssim-report.txt
+          retention-days: 3
+          if-no-files-found: warn
