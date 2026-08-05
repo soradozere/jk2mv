@@ -127,7 +127,7 @@ jobs:
             xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" \
               "$ROOT/jk2mvmp" \
               +set fs_basepath "$ROOT" +set fs_homepath "$ROOT" \
-              +exec "cam-$NAME.cfg" 2>&1 | grep -iE "demoFollow|demoCam|thirdPerson|wrote|avi|ERROR" | tail -12 || true
+              +exec "cam-$NAME.cfg" 2>&1 | tail -25 || true
             echo "pass $NAME took $(( $(date +%s) - START ))s"
             echo "::endgroup::"
           }
@@ -146,16 +146,33 @@ jobs:
           ROOT: ${{ steps.root.outputs.ROOT }}
         run: |
           mkdir -p out
+          echo "=== raw captures ==="
+          find "$ROOT" -name "*.avi" -exec ls -la {} \;
+
           # The engine writes captures to base/videos/, not base/ -- find rather
-          # than glob, so a future path change does not silently yield nothing.
+          # than glob, so a future path change fails loudly instead of quietly
+          # yielding nothing.
           find "$ROOT" -name "*.avi" -print0 | while IFS= read -r -d '' AVI; do
             NAME=$(basename "$AVI" .avi)
-            # Two frames apart in time, so a static camera is distinguishable
-            # from a tracking one.
-            ffmpeg -y -ss 3 -i "$AVI" -frames:v 1 "out/${NAME}-t3.jpg" 2>/dev/null || true
-            ffmpeg -y -ss 8 -i "$AVI" -frames:v 1 "out/${NAME}-t8.jpg" 2>/dev/null || true
+            echo "::group::$NAME"
+            ffprobe -v error -show_entries stream=codec_type,nb_frames,duration \
+              -of default=noprint_wrappers=1 "$AVI" || true
+
+            # Transcode first, then pull stills from the mp4. Seeking directly
+            # in the capture is unreliable -- a previous attempt lost two of
+            # four passes to failed -ss seeks on AVIs whose index the engine
+            # had not finalised.
             ffmpeg -y -i "$AVI" -c:v libx264 -pix_fmt yuv420p -crf 26 -preset veryfast \
-              -c:a aac -b:a 96k "out/${NAME}.mp4" 2>/dev/null || true
+              -c:a aac -b:a 96k "out/${NAME}.mp4" 2>&1 | tail -3
+
+            # First frame always exists; the later one is taken at 80% of the
+            # real duration so it cannot land past the end.
+            ffmpeg -y -i "out/${NAME}.mp4" -frames:v 1 "out/${NAME}-first.jpg" 2>&1 | tail -2
+            DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "out/${NAME}.mp4" || echo 0)
+            LATE=$(awk -v d="$DUR" 'BEGIN{printf "%.2f", (d>0? d*0.8 : 0)}')
+            ffmpeg -y -ss "$LATE" -i "out/${NAME}.mp4" -frames:v 1 "out/${NAME}-late.jpg" 2>&1 | tail -2
+            echo "duration=$DUR late=$LATE"
+            echo "::endgroup::"
           done
           ls -la out/
 
