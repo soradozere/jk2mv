@@ -1,0 +1,155 @@
+name: Render Prototype (Gate 1a/1b)
+
+# One-off spike: prove headless native AVI capture with audio works on a
+# GitHub Actions runner, before any of the YouTube render pipeline is built
+# for real. workflow_dispatch only -- never on push, this is throwaway.
+on:
+  workflow_dispatch:
+
+jobs:
+  render:
+    name: Native headless render + ffmpeg convert
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Install build + render dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake \
+            libsdl2-dev libgl1-mesa-dev libopenal-dev libjpeg-dev libpng-dev libminizip-dev \
+            xvfb libgl1-mesa-dri \
+            ffmpeg
+
+      - name: Configure CMake
+        run: |
+          mkdir -p build/actions
+          cmake -S . -B build/actions -DCMAKE_BUILD_TYPE=Release -DUseInternalLibs=OFF -DBuildPortableVersion=ON
+
+      - name: Build
+        run: cmake --build build/actions -j"$(nproc)"
+
+      - name: Locate built binary
+        id: bin
+        run: |
+          # The client target is jk2mvmp (CMakeLists.txt: set(MVMP "jk2mvmp")).
+          # Match a prefix -- some configs append an arch suffix.
+          BIN=$(find build/actions -type f -executable -name "jk2mvmp*" ! -name "*.so" | head -1)
+          if [ -z "$BIN" ]; then
+            echo "No jk2mvmp binary found; build tree was:" >&2
+            find build/actions -type f -executable | head -50
+            exit 1
+          fi
+          echo "Found binary: $BIN"
+          echo "BIN=$(realpath "$BIN")" >> "$GITHUB_OUTPUT"
+
+      - name: Write render config
+        run: |
+          mkdir -p GameData/base
+          cat > GameData/base/render.cfg <<'EOF'
+          set com_hunkMegs 256
+
+          // Software GL under xvfb -- windowed, no vsync pacing.
+          set r_mode -1
+          set r_customwidth 1280
+          set r_customheight 720
+          set r_fullscreen 0
+          set r_swapInterval 0
+
+          // AVI audio is only captured from the base DMA mixer. Under OpenAL
+          // cl_avi.cpp disables audio outright and the render comes out silent,
+          // so this is mandatory, not a preference.
+          set s_useOpenAL 0
+          set s_initsound 1
+          set s_volume 0.8
+
+          set cl_aviFrameRate 30
+          set cl_aviMotionJpeg 1
+          set cl_aviMotionJpegQuality 90
+
+          // Clean picture: no HUD, no console spam burnt into the frames.
+          set cg_draw2D 0
+          set con_notifytime 0
+          set cl_noprint 1
+
+          // CL_NextDemo fires when playback ends -- this is what stops the job.
+          set nextdemo "stopvideo; quit"
+
+          // Order matters: start playback first, then capture. Capture locks to
+          // a fixed timestep only once cls.state hits CA_ACTIVE, so the wait
+          // lets the map finish loading before the first frame is written.
+          demo ffa_bespin_gigachad
+          wait 200
+          video render-gate1
+          EOF
+          cat GameData/base/render.cfg
+
+      - name: Render headless under xvfb
+        timeout-minutes: 15
+        env:
+          # llvmpipe, not the runner's absent GPU.
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          # No sound card on a runner; the DMA mixer still needs a device to
+          # open so dma.speed/channels/samplebits get populated.
+          SDL_AUDIODRIVER: "dummy"
+        run: |
+          START=$(date +%s)
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" \
+            "${{ steps.bin.outputs.BIN }}" \
+            +set fs_basepath "$GITHUB_WORKSPACE/GameData" \
+            +set fs_homepath "$GITHUB_WORKSPACE/GameData" \
+            +set developer 1 \
+            +set logfile 2 \
+            +exec render.cfg 2>&1 | tail -200 || true
+          END=$(date +%s)
+          echo "=== Render wall-clock seconds: $((END - START)) ==="
+
+      - name: Show engine log
+        if: always()
+        run: |
+          LOG=$(find GameData -iname "qconsole.log" | head -1)
+          [ -n "$LOG" ] && cp "$LOG" qconsole.log && tail -150 qconsole.log || echo "no qconsole.log"
+
+      - name: Find AVI output
+        id: avi
+        run: |
+          AVI=$(find GameData -iname "*.avi" | head -1)
+          if [ -z "$AVI" ]; then
+            echo "No AVI produced -- render failed" >&2
+            find GameData -maxdepth 3 -type f -newer GameData/base/render.cfg
+            exit 1
+          fi
+          echo "Found AVI: $AVI"
+          echo "AVI=$AVI" >> "$GITHUB_OUTPUT"
+          ls -la "$AVI"
+
+      - name: Inspect and convert with ffmpeg
+        run: |
+          echo "=== ffprobe: does this have an audio stream? ==="
+          ffprobe -hide_banner "${{ steps.avi.outputs.AVI }}" 2>&1 | tee ffprobe-report.txt
+          echo "=== stream summary ==="
+          ffprobe -v error -show_entries stream=codec_type,codec_name,duration,nb_frames \
+            -of default=noprint_wrappers=1 "${{ steps.avi.outputs.AVI }}" | tee -a ffprobe-report.txt
+          ffmpeg -y -i "${{ steps.avi.outputs.AVI }}" -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 128k render-gate1.mp4
+          ls -la render-gate1.mp4
+
+      - name: Grab still frames for visual sanity check
+        run: |
+          ffmpeg -y -ss 1 -i render-gate1.mp4 -frames:v 1 frame-01s.jpg || true
+          ffmpeg -y -ss 5 -i render-gate1.mp4 -frames:v 1 frame-05s.jpg || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: render-gate1-output
+          path: |
+            render-gate1.mp4
+            frame-*.jpg
+            ffprobe-report.txt
+            qconsole.log
+          retention-days: 3
+          if-no-files-found: warn
