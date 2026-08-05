@@ -21,7 +21,7 @@ env:
   ASSET_VERSION: "20260805"
   R2_PUBLIC: "https://pub-76bff0ef02794a5d95b7e2a8b8660f61.r2.dev"
   # Short passes: enough to see framing, cheap enough to run four of them.
-  CAPTURE_FRAMES: "300"
+  CAPTURE_FRAMES: "60"   # ~30 rendered frames; cbuf ticks twice per frame
   FPS: "30"
 
 jobs:
@@ -132,11 +132,20 @@ jobs:
             echo "::endgroup::"
           }
 
-          #            name          demoCam follow third angle range
-          render_pass  A-recorder     0      -1     0     0     80
-          render_pass  B-chase-c0     0       0     1     0     80
-          render_pass  C-front-c0     0       0     1   180     80
-          render_pass  D-chase-c1     0       1     1     0     80
+          # Sweep every client slot rather than guessing. The first attempt
+          # compared follow=0 against follow=1 and got identical frames, which
+          # proves nothing on its own: an out-of-range slot falls back to the
+          # default view, so two invalid slots look exactly like a broken cvar.
+          # Whichever slots hold real players will frame a different subject.
+          for C in 0 1 2 3 4 5 6 7; do
+            render_pass "follow-$C" 0 "$C" 1 0 80
+          done
+
+          # Controls already known to differ, kept as reference points, plus
+          # the free camera which has not been exercised at all yet.
+          render_pass  ref-recorder   0      -1     0     0     80
+          render_pass  ref-angle180   0      -1     1   180     80
+          render_pass  ref-freecam    1      -1     0     0     80
 
           echo "=== AVIs produced ==="
           ls -la "$ROOT/base/"*.avi 2>/dev/null || find "$ROOT" -name "*.avi"
