@@ -1,0 +1,179 @@
+name: Chunk Boundary Test (Step 5 validation)
+
+# Does splitting a capture into chunks change the result?
+#
+# Chunking is what makes long renders possible -- the engine writes MJPEG at
+# ~4.3 MB/s per 30fps, so a 2h render at 60fps is ~62GB against a runner's
+# ~14GB disk. The workflow therefore alternates video/stopvideo and concatenates
+# the pieces. That is only safe if a chunked render is *identical* to an
+# unbroken one.
+#
+# Two failure modes worth catching before this runs on a real match:
+#   - stopvideo/video drops or duplicates frames at each boundary, so the
+#     output drifts further from the demo the longer it runs
+#   - each chunk carries its own audio stream, and concatenating them
+#     accumulates A/V drift
+#
+# So: render the same window twice, once whole and once in four chunks, and
+# compare frame counts, durations and the picture at the boundaries.
+on:
+  workflow_dispatch:
+
+env:
+  ASSET_VERSION: "20260805"
+  R2_PUBLIC: "https://pub-76bff0ef02794a5d95b7e2a8b8660f61.r2.dev"
+  FPS: "30"
+  TOTAL_FRAMES: "600"    # 20s
+  CHUNK_FRAMES: "150"    # 5s -> four chunks
+
+jobs:
+  chunks:
+    name: Whole vs chunked
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true, fetch-depth: 0, path: jk2mv }
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake \
+            libsdl2-dev libgl1-mesa-dev libopenal-dev libjpeg-dev libpng-dev libminizip-dev \
+            xvfb libgl1-mesa-dri ffmpeg
+
+      - name: Build engine
+        run: |
+          cmake -S jk2mv -B jk2mv/build/actions \
+            -DCMAKE_BUILD_TYPE=Release -DUseInternalLibs=OFF -DBuildPortableVersion=ON
+          cmake --build jk2mv/build/actions -j"$(nproc)"
+
+      - name: Resolve game root
+        id: root
+        run: echo "ROOT=$GITHUB_WORKSPACE/jk2mv/build/actions/out/Release" >> "$GITHUB_OUTPUT"
+
+      - name: Restore game assets from cache
+        id: assetcache
+        uses: actions/cache@v4
+        with:
+          path: assets/base-min.tar
+          key: jk2-assets-${{ env.ASSET_VERSION }}
+
+      - name: Download game assets
+        if: steps.assetcache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p assets
+          curl -fsSL -o assets/base-min.tar "$R2_PUBLIC/render-assets/$ASSET_VERSION/base-min.tar"
+
+      - name: Stage
+        env: { ROOT: "${{ steps.root.outputs.ROOT }}" }
+        run: |
+          mkdir -p "$ROOT/base/demos"
+          tar -xf assets/base-min.tar -C "$ROOT/base"
+          curl -fsSL -o "$ROOT/base/demos/gate-demo.dm_15" \
+            "$R2_PUBLIC/render-assets/$ASSET_VERSION/gate-demo.dm_15"
+
+      - name: Render whole, then chunked
+        timeout-minutes: 40
+        env:
+          ROOT: ${{ steps.root.outputs.ROOT }}
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          SDL_AUDIODRIVER: "dummy"
+        run: |
+          set -u
+          # cbuf ticks twice per rendered frame, measured.
+          common () {
+            echo "set com_hunkMegs 256"
+            echo "set r_mode -1"; echo "set r_customwidth 1280"; echo "set r_customheight 720"
+            echo "set r_fullscreen 0"; echo "set r_swapInterval 0"
+            echo "set s_useOpenAL 0"; echo "set s_volume 0.8"
+            echo "set cl_aviFrameRate $FPS"
+            echo "set cl_aviMotionJpeg 1"; echo "set cl_aviMotionJpegQuality 90"
+            echo "set cg_draw2D 0"; echo "set cl_noprint 1"
+            echo ""
+            echo "demo gate-demo"
+            echo "wait 400"
+            echo "set cg_thirdPerson 1"; echo "set cg_thirdPersonRange 80"
+            echo "set cg_thirdPersonAngle 0"; echo "set cg_cameraOrbit 0"
+            echo "wait 30"
+          }
+
+          { common; echo "video whole"; echo "wait $(( TOTAL_FRAMES * 2 ))"
+            echo "stopvideo"; echo "quit"; } > "$ROOT/base/whole.cfg"
+
+          { common
+            N=$(( TOTAL_FRAMES / CHUNK_FRAMES ))
+            for i in $(seq 0 $(( N - 1 ))); do
+              printf 'video chunk%03d\n' "$i"
+              echo "wait $(( CHUNK_FRAMES * 2 ))"
+              echo "stopvideo"
+            done
+            echo "quit"; } > "$ROOT/base/chunked.cfg"
+
+          run_cfg () {
+            xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" \
+              "$ROOT/jk2mvmp" +set fs_basepath "$ROOT" +set fs_homepath "$ROOT" \
+              +exec "$1" >/dev/null 2>&1 || true
+          }
+          echo "rendering whole..."; run_cfg whole.cfg
+          echo "rendering chunked..."; run_cfg chunked.cfg
+          find "$ROOT" -name "*.avi" -exec ls -la {} \;
+
+      - name: Compare
+        env: { ROOT: "${{ steps.root.outputs.ROOT }}" }
+        run: |
+          set -u
+          mkdir -p out
+          VID=$(dirname "$(find "$ROOT" -name "whole.avi" | head -1)")
+
+          # -nostdin everywhere: ffmpeg otherwise eats the loop's stdin.
+          ffmpeg -nostdin -y -i "$VID/whole.avi" -c:v libx264 -crf 21 -preset veryfast \
+            -pix_fmt yuv420p -c:a aac -b:a 128k out/whole.mp4 2>&1 | tail -2
+
+          : > concat.txt
+          for f in $(ls -1 "$VID"/chunk*.avi | sort); do
+            b="out/$(basename "$f" .avi).mp4"
+            ffmpeg -nostdin -y -i "$f" -c:v libx264 -crf 21 -preset veryfast \
+              -pix_fmt yuv420p -c:a aac -b:a 128k "$b" 2>&1 | tail -1
+            printf "file '%s'\n" "$PWD/$b" >> concat.txt
+          done
+          ffmpeg -nostdin -y -f concat -safe 0 -i concat.txt -c copy out/chunked.mp4 2>&1 | tail -2
+
+          count () { ffprobe -v error -count_frames -select_streams v:0 \
+            -show_entries stream=nb_read_frames -of csv=p=0 "$1"; }
+          dur () { ffprobe -v error -show_entries format=duration -of csv=p=0 "$1"; }
+
+          WF=$(count out/whole.mp4);   CF=$(count out/chunked.mp4)
+          WD=$(dur out/whole.mp4);     CD=$(dur out/chunked.mp4)
+          echo "=============================================="
+          echo " whole:   $WF frames, ${WD}s"
+          echo " chunked: $CF frames, ${CD}s"
+          echo " expected $TOTAL_FRAMES frames"
+          echo "=============================================="
+          [ "$WF" = "$CF" ] && echo "FRAME COUNTS MATCH" || echo "MISMATCH: chunking changed the frame count by $(( CF - WF ))"
+
+          echo "=== audio present and non-silent in both ==="
+          for f in out/whole.mp4 out/chunked.mp4; do
+            printf '%s: ' "$f"
+            ffmpeg -nostdin -i "$f" -af volumedetect -f null /dev/null 2>&1 | grep mean_volume || echo "NO AUDIO"
+          done
+
+          # The picture either side of a boundary. Chunk 0 ends at 5s, so if
+          # stopvideo/video loses a frame the two files diverge from there on
+          # and SSIM drops away from 1.
+          echo "=== SSIM at each chunk boundary (1.0 = identical) ==="
+          for T in 4.9 5.0 5.1 9.9 10.0 10.1 15.0; do
+            ffmpeg -nostdin -y -ss "$T" -i out/whole.mp4 -frames:v 1 /tmp/a.png 2>/dev/null || continue
+            ffmpeg -nostdin -y -ss "$T" -i out/chunked.mp4 -frames:v 1 /tmp/b.png 2>/dev/null || continue
+            S=$(ffmpeg -nostdin -i /tmp/a.png -i /tmp/b.png -lavfi ssim -f null - 2>&1 \
+                | grep -o "All:[0-9.]*" | head -1 | cut -d: -f2)
+            echo "  t=${T}s  ssim=${S:-n/a}"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chunk-test-output
+          path: out/
+          retention-days: 3
+          if-no-files-found: warn
