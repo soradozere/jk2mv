@@ -475,6 +475,8 @@ All console printing must go through this in order to be logged to disk
 If no console is visible, the text will appear at the top of the game window
 ================
 */
+extern cvar_t *r_hexColors;
+
 void CL_ConsolePrint( const char *txt, qboolean extendedColors, qboolean skipNotify ) {
 	unsigned char	color;
 	char			c;

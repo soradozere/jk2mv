@@ -792,7 +792,19 @@ int RE_Font_StrLenChars(const char *psText)
 
 		switch (uiChar)
 		{
-			case '^':	if ( *psText ) psText++;	break;	// colour code (note next-char skip)
+			case '^':
+				// Hex codes are longer than one character, so skipping a fixed
+				// two would leave their digits counted as visible letters and
+				// throw off every width and centring calculation.
+				if ( r_hexColors->integer && Q_IsColorStringHex( psText ) ) {
+					int skipCount = 0;
+					if ( Q_parseColorHex( psText, NULL, &skipCount ) ) {
+						psText += skipCount;
+						break;
+					}
+				}
+				if ( *psText ) psText++;
+				break;	// colour code (note next-char skip)
 			case 10:								break;	// linefeed
 			case 13:								break;	// return
 			default:	iCharCount++;				break;
@@ -890,6 +902,26 @@ void RE_Font_DrawString(int ox, int oy, const char *psText, const vec4_t rgba, i
 		{
 		case '^':
 			if ( !*psText ) break; // If we were given a string ending with '^'
+			/*
+			Hex first, named codes second.
+			
+			A failed hex parse falls through deliberately: a name containing a
+			stray ^x that is not followed by valid digits has to keep rendering
+			the way it always did, rather than disappearing.
+			*/
+			if ( r_hexColors->integer && Q_IsColorStringHex( psText ) ) {
+				vec4_t hexColour;
+				int skipCount = 0;
+				if ( Q_parseColorHex( psText, hexColour, &skipCount ) ) {
+					psText += skipCount;
+					colourChain++;
+					if (!gbInShadow || (colorShadow && !(colourChain % 2)))
+					{
+						RE_SetColor( hexColour );
+					}
+					break;
+				}
+			}
 			colour = ColorIndex(*psText);
 			colourChain++; // Keep track of the amount of chained colors
 			if (!gbInShadow || (colorShadow && !(colourChain % 2)))

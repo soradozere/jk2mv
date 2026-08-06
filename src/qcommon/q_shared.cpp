@@ -774,6 +774,91 @@ int Q_stricmp(const char *s1, const char *s2) {
 	return (s1 && s2) ? Q_stricmpn(s1, s2, 99999) : -1;
 }
 
+/*
+Read a hex colour code into RGBA floats.
+
+From TomArrow's jk2mv fork. Reports how many characters the caller should skip
+so a failed parse leaves the string to be handled normally rather than eating
+it -- a name containing a stray ^x that is not followed by hex digits must
+still render as written.
+
+`color` may be NULL, which parses purely to obtain the skip count.
+*/
+qboolean Q_parseColorHex(const char* p, float* color, int* skipCount) {
+	char c = *p++;
+	int i;
+	int val = 0;
+
+	qboolean doWrite = qtrue;
+	if (!color) {
+		doWrite = qfalse;
+	}
+
+	*skipCount = 0; // Only set on success, so a failed parse changes nothing.
+
+	int countToParse = 8;
+	qboolean halfPrecision = qfalse;
+	if (c == 'Y') {
+		countToParse = 8;
+	}
+	else if (c == 'y') {
+		countToParse = 4;
+		halfPrecision = qtrue;
+	}
+	else if (c == 'X') {
+		countToParse = 6;
+		if (doWrite) color[3] = 1.0f; // The opaque forms carry no alpha.
+	}
+	else if (c == 'x') {
+		countToParse = 3;
+		if (doWrite) color[3] = 1.0f;
+		halfPrecision = qtrue;
+	}
+	else {
+		return qfalse;
+	}
+
+	int presumableSkipCount = countToParse + 1;
+
+	for (i = 0; i < countToParse; i++) {
+		int readHex;
+		c = p[i];
+		if (c >= '0' && c <= '9') {
+			readHex = c - '0';
+		}
+		else if (c >= 'a' && c <= 'f') {
+			readHex = 0xa + c - 'a';
+		}
+		else if (c >= 'A' && c <= 'F') {
+			readHex = 0xa + c - 'A';
+		}
+		else {
+			if (color) {
+				color[0] = color[1] = color[2] = color[3] = 1.0f;
+			}
+			return qfalse;
+		}
+		if (doWrite) {
+			if (halfPrecision) { // One digit per channel, 0-f scaled to 0..1.
+				val = readHex;
+				color[i] = val * (1 / 15.0f);
+			}
+			else {
+				if (i & 1) {
+					val |= readHex;
+					color[i >> 1] = val * (1 / 255.0f);
+				}
+				else {
+					val = readHex << 4;
+				}
+			}
+		}
+	}
+
+	*skipCount = presumableSkipCount;
+	return qtrue;
+}
+
 char *Q_stristr(const char *str, char *charset) {
 	int i;
 

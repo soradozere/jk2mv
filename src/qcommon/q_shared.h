@@ -714,6 +714,36 @@ extern const vec4_t		colorDkBlue;
 #define Q_IsColorString_1_02(p)	( p && *(p) == Q_COLOR_ESCAPE && *((p)+1) && *((p)+1) != Q_COLOR_ESCAPE ) // 1.02 ColorStrings
 #define Q_IsColorString_Extended(p) Q_IsColorString_1_02(p)
 
+/*
+Hex colour codes, lifted from TomArrow's jk2mv fork.
+
+Player names written by the NWH name editor carry these, and a client that does
+not understand them renders the escape and its digits as literal garbage --
+visible in the kill feed, the HUD portrait and the scoreboard alike.
+
+Four widths, in the escape character that follows ^:
+  ^xRGB        3 digits, opaque
+  ^XRRGGBB     6 digits, opaque
+  ^yRGBA       4 digits, with alpha
+  ^YRRGGBBAA   8 digits, with alpha
+
+Gated on r_hexColors rather than the upstream original, which overloads
+r_fullbright values 200000-200001 as a feature flag. That works, but a magic
+number inside a lighting cvar is unreadable to whoever finds it next.
+*/
+#define Q_IsHex(p) ((p) && ((*(p) >= '0' && *(p) <= '9') || (*(p) >= 'a' && *(p) <= 'f') || (*(p) >= 'A' && *(p) <= 'F')))
+
+#define Q_IsColorStringHex(p) ((Q_IsColorStringHexY((p))) || (Q_IsColorStringHexy((p))) || (Q_IsColorStringHexX((p))) || (Q_IsColorStringHexx((p)) ))
+#define Q_IsColorStringHexY(p) ((p)+8) && (p) && *(p)=='Y' && Q_IsHex((p+1)) && Q_IsHex((p+2)) && Q_IsHex((p+3)) && Q_IsHex((p+4)) && Q_IsHex((p+5)) && Q_IsHex((p+6)) && Q_IsHex((p+7)) && Q_IsHex((p+8))
+#define Q_IsColorStringHexy(p) ((p)+4) && (p) && *(p)=='y' && Q_IsHex((p+1)) && Q_IsHex((p+2)) && Q_IsHex((p+3)) && Q_IsHex((p+4))
+#define Q_IsColorStringHexX(p) ((p)+6) && (p) && *(p)=='X' && Q_IsHex((p+1)) && Q_IsHex((p+2)) && Q_IsHex((p+3)) && Q_IsHex((p+4)) && Q_IsHex((p+5)) && Q_IsHex((p+6))
+#define Q_IsColorStringHexx(p) ((p)+3) && (p) && *(p)=='x' && Q_IsHex((p+1)) && Q_IsHex((p+2)) && Q_IsHex((p+3))
+
+/** Reads a hex colour into `color` (RGBA 0..1) and reports how many characters
+    to skip. Returns qfalse and leaves the string to be parsed normally when the
+    digits do not check out. `color` may be NULL to skip without writing. */
+qboolean Q_parseColorHex(const char* p, float* color, int* skipCount);
+
 // Default Colors
 #define COLOR_BLACK		'0'
 #define COLOR_RED		'1'

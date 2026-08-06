@@ -71,6 +71,7 @@ cvar_t	*r_drawentities;
 cvar_t	*r_drawworld;
 cvar_t	*r_speeds;
 cvar_t	*r_fullbright;
+cvar_t	*r_hexColors;
 cvar_t	*r_novis;
 cvar_t	*r_nocull;
 cvar_t	*r_facePlaneCull;
@@ -1165,6 +1166,16 @@ void R_Register( void )
 	r_texturebits = ri.Cvar_Get("r_texturebits", "0", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 	r_texturebitslm = ri.Cvar_Get("r_texturebitslm", "0", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
 	r_overBrightBits = ri.Cvar_Get("r_overBrightBits", "1", CVAR_ARCHIVE | CVAR_GLOBAL | CVAR_LATCH);
+	/*
+	Hex colour codes in names and console text (^xRGB and friends).
+	
+	On by default: without it a name written by the NWH name editor renders its
+	escape and digits as literal characters, which is worse than the colour
+	simply being wrong. Upstream gates this on r_fullbright 200000-200001 -- a
+	lighting cvar overloaded as a feature flag -- which works but is unreadable
+	to anyone reading a config later.
+	*/
+	r_hexColors = ri.Cvar_Get("r_hexColors", "1", CVAR_ARCHIVE | CVAR_GLOBAL);
 	/*
 	Brighter by default in the browser, because the usual route to it is closed.
 

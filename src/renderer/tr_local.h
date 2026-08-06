@@ -1259,6 +1259,7 @@ extern	cvar_t	*r_offsetFactor;
 extern	cvar_t	*r_offsetUnits;
 
 extern	cvar_t	*r_fullbright;					// avoid lightmap pass
+extern	cvar_t	*r_hexColors;					// ^xRGB colour codes in names and console text
 extern	cvar_t	*r_lightmap;					// render lightmaps only
 extern	cvar_t	*r_vertexLight;					// vertex lighting mode for better performance
 extern	cvar_t	*r_uiFullScreen;				// ui is running fullscreen
