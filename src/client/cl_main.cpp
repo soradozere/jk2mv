@@ -25,6 +25,12 @@ cvar_t	*cl_debugMove;
 
 cvar_t	*cl_demoSuppressChat;
 
+#ifdef __EMSCRIPTEN__
+// Up here rather than with the JS exports below, because the seek driver is
+// shared now and still has one line to say to the page when it finishes.
+#include <emscripten.h>
+#endif
+
 /*
 Demo playback bookkeeping, and the forward seek built on it.
 
@@ -169,16 +175,15 @@ static qboolean CL_DemoSeekStep( int targetTime, int budgetMs ) {
 		A message that doesn't move the clock is not the end of the demo.
 
 		Snapshots delta'd from a frame the client no longer holds get dropped,
-		and a run of them is ordinary around a map restart or a burst of
-		configstrings -- the 20-minute match demo used to test this has one
-		about fourteen seconds in, right where warmup ends.
+		and a run of them is ordinary. The record count above is the real end of
+		the file and it is exact, so all this has to catch is a stream that has
+		genuinely stopped moving.
 
-		Stopping at the first of those and reporting success is what made
-		"seek to seventeen minutes" quietly render from fourteen seconds. The
-		record count above is the real end of the file and it is exact, so all
-		this has to catch is a stream that has genuinely stopped moving. A few
-		hundred records is far more than a restart costs and still finite when
-		the count is unknown.
+		Worth being clear that this is not what made a seek to seventeen minutes
+		stop at fourteen seconds: that was the loop leaving CA_ACTIVE across a
+		map restart, fixed in CL_CheckPendingSeek. Relaxing the break changed
+		nothing there. It stays because breaking on a single dropped snapshot
+		was wrong regardless, but it is a hardening, not the fix.
 		*/
 		if ( cl.snap.serverTime == before ) {
 			if ( ++stalled > 512 ) {
@@ -215,6 +220,88 @@ static void CL_DemoSeekFinish( void ) {
 	// snapshots. This just clears anything already in flight when the seek began,
 	// so a saber hum from the old position doesn't survive the jump.
 	S_StopAllSounds();
+}
+
+// Seeking. A demo is a delta-compressed stream, so there is no index to jump to
+// -- the only way to reach a moment is to replay into it. Forwards that costs
+// nothing but parsing, which is why it's done inline here rather than spread
+// over frames: no rendering, no sound, no cgame, just message decode.
+//
+// Backwards has no shortcut at all. The client state at time T is the sum of
+// every message before it, so the demo has to be restarted and replayed. That's
+// queued rather than done inline because restarting tears down and rebuilds
+// cgame, which can't happen underneath a call from the page.
+static int	cl_demoPendingSeek = -1;
+
+/*
+A seek must never run with the demo frozen, so the freeze is lifted for the
+duration and put back afterwards. This is not a nicety.
+
+CL_SetCGameTime ends with
+
+	while ( cl.serverTime >= cl.snap.serverTime ) { CL_ReadDemoMessage(); }
+
+and that loop runs whether or not the demo is frozen -- but cl.serverTime is only
+updated in the *un*frozen branch above it. Freeze the demo and cl.serverTime is
+pinned wherever it was; restart the demo under a backward seek and cl.snap
+.serverTime drops back to the start of the file. The loop then tears through
+thousands of messages in a single frame to catch up to a timestamp that no longer
+means anything, and it does so without draining the reliable command ring, so
+every configstring in that stretch is lost.
+
+The visible result is entities rendering as the wrong model: a turret whose
+model index no longer resolves ends up as some other model, cgame asks it for
+"bone_hinge", and Ghoul2 aborts the engine outright.
+*/
+static int	cl_demoSeekWasFrozen = 0;
+
+/*
+Drive an in-progress seek. Called once per frame, which is the whole point.
+
+A seek cannot be run to completion inside one call, and finding that out cost
+two rendered videos of the wrong part of a match. Demos contain more than one
+gamestate -- a map restart at the end of warmup is the ordinary case, and the
+20-minute match demo has one fourteen seconds in. Parsing it drops cls.state
+out of CA_ACTIVE, and getting back requires the map to load and cgame to start,
+which happens across frames. A loop that never yields therefore stops dead
+there, however much of the demo is left.
+
+Spread over frames it simply resumes: the target is an absolute server time, so
+the demo advancing in the meantime costs nothing but distance already covered.
+*/
+void CL_SeekDemoReport( void );
+
+void CL_CheckPendingSeek( void ) {
+	if ( cl_demoPendingSeek < 0 ) {
+		return;
+	}
+	// Reloading, not finished. Come back next frame.
+	if ( cls.state != CA_ACTIVE || !cl.snap.valid ) {
+		// Unless there is nothing to come back to -- the demo ended, or failed
+		// to reload -- in which case waiting forever is the worse answer.
+		if ( cls.state == CA_DISCONNECTED ) {
+			cl_demoPendingSeek = -1;
+			CL_SeekDemoReport();
+			Cbuf_Wait( 0 );
+		}
+		return;
+	}
+	// A frame's worth of parsing at a time. Long enough to cross hours of demo
+	// in a handful of frames, short enough that the page stays responsive.
+	if ( !CL_DemoSeekStep( cl_demoPendingSeek, 30 ) ) {
+		return;
+	}
+	CL_DemoSeekFinish();
+	cl_demoPendingSeek = -1;
+	// Back to however the viewer had it: a seek started from a paused demo
+	// should land paused, not start playing on its own.
+	Cvar_SetValue( "cl_freezeDemo", (float)cl_demoSeekWasFrozen );
+	CL_SeekDemoReport();
+	// Let the config file continue. Nothing when the seek came from the page.
+	Cbuf_Wait( 0 );
+#ifdef __EMSCRIPTEN__
+	EM_ASM( { if (window.JKD_seekDone) { window.JKD_seekDone(); } } );
+#endif
 }
 
 #ifdef __EMSCRIPTEN__
@@ -407,38 +494,6 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetConnectedMask( void ) {
 	return mask;
 }
 
-// Seeking. A demo is a delta-compressed stream, so there is no index to jump to
-// -- the only way to reach a moment is to replay into it. Forwards that costs
-// nothing but parsing, which is why it's done inline here rather than spread
-// over frames: no rendering, no sound, no cgame, just message decode.
-//
-// Backwards has no shortcut at all. The client state at time T is the sum of
-// every message before it, so the demo has to be restarted and replayed. That's
-// queued rather than done inline because restarting tears down and rebuilds
-// cgame, which can't happen underneath a call from the page.
-static int	cl_wasmPendingSeek = -1;
-
-/*
-A seek must never run with the demo frozen, so the freeze is lifted for the
-duration and put back afterwards. This is not a nicety.
-
-CL_SetCGameTime ends with
-
-	while ( cl.serverTime >= cl.snap.serverTime ) { CL_ReadDemoMessage(); }
-
-and that loop runs whether or not the demo is frozen -- but cl.serverTime is only
-updated in the *un*frozen branch above it. Freeze the demo and cl.serverTime is
-pinned wherever it was; restart the demo under a backward seek and cl.snap
-.serverTime drops back to the start of the file. The loop then tears through
-thousands of messages in a single frame to catch up to a timestamp that no longer
-means anything, and it does so without draining the reliable command ring, so
-every configstring in that stretch is lost.
-
-The visible result is entities rendering as the wrong model: a turret whose
-model index no longer resolves ends up as some other model, cgame asks it for
-"bone_hinge", and Ghoul2 aborts the engine outright.
-*/
-static int	cl_wasmSeekWasFrozen = 0;
 
 // Defined in cl_cgame.cpp with C++ linkage, so it has to be declared that way --
 // everything around here sits inside an extern "C" block for the JS exports.
@@ -451,24 +506,6 @@ extern "C++" void CL_Record_f( void );
 extern "C++" void CL_StopRecord_f( void );
 
 
-// Drive an in-progress seek. Called once per frame, so the browser keeps
-// painting and the page can show how far along it is.
-void CL_WasmCheckPendingSeek( void ) {
-	if ( cl_wasmPendingSeek < 0 || cls.state != CA_ACTIVE || !cl.snap.valid ) {
-		return;
-	}
-	// A frame's worth of parsing at a time. Long enough to cross hours of demo
-	// in a handful of frames, short enough that the page stays responsive.
-	if ( !CL_DemoSeekStep( cl_wasmPendingSeek, 30 ) ) {
-		return;
-	}
-	CL_DemoSeekFinish();
-	cl_wasmPendingSeek = -1;
-	// Back to however the viewer had it: a seek started from a paused demo
-	// should land paused, not start playing on its own.
-	Cvar_SetValue( "cl_freezeDemo", (float)cl_wasmSeekWasFrozen );
-	EM_ASM( { if (window.JKD_seekDone) { window.JKD_seekDone(); } } );
-}
 
 // Seek to a server time in milliseconds. Always deferred: seeks are worked
 // through a frame at a time, so this only sets the target.
@@ -480,12 +517,12 @@ EMSCRIPTEN_KEEPALIVE int JKD_SeekTo( int targetTime ) {
 	// Only the seek that starts a gesture records the freeze state; one issued
 	// while another is still running would otherwise save the lifted value and
 	// leave a paused demo playing when it lands.
-	if ( cl_wasmPendingSeek < 0 ) {
-		cl_wasmSeekWasFrozen = cl_freezeDemo->integer;
+	if ( cl_demoPendingSeek < 0 ) {
+		cl_demoSeekWasFrozen = cl_freezeDemo->integer;
 	}
 	Cvar_Set( "cl_freezeDemo", "0" );
 
-	cl_wasmPendingSeek = targetTime;
+	cl_demoPendingSeek = targetTime;
 	if ( targetTime <= cl.snap.serverTime ) {
 		// Backwards has no shortcut -- state at a given time is the sum of every
 		// message before it -- so the demo restarts and replays from the top.
@@ -499,7 +536,7 @@ EMSCRIPTEN_KEEPALIVE int JKD_SeekTo( int targetTime ) {
 // True while a seek is still being worked through, so the page can say so
 // rather than appear to have ignored the drag.
 EMSCRIPTEN_KEEPALIVE int JKD_IsSeeking( void ) {
-	return cl_wasmPendingSeek >= 0 ? 1 : 0;
+	return cl_demoPendingSeek >= 0 ? 1 : 0;
 }
 
 /*
@@ -704,7 +741,7 @@ EMSCRIPTEN_KEEPALIVE int JKD_TrimDemo( int endMs, const char *outName ) {
 	if ( clc.demorecording ) {
 		return -2;		// one at a time
 	}
-	if ( cl_wasmPendingSeek >= 0 ) {
+	if ( cl_demoPendingSeek >= 0 ) {
 		return -3;		// mid-seek: the in-point is not settled yet
 	}
 	if ( !outName || !outName[0] ) {
@@ -1438,11 +1475,17 @@ not cost an hour of capture: without this the workflow renders the whole
 lead-in and throws it away, which is both slow and, at 1440p, more intermediate
 video than a CI runner has disk for.
 
-Run to completion here rather than sliced across frames the way the viewer does
-it. There is no page to keep repainting, and the caller is a config file, so
-the seek has to be finished by the time the next command runs.
+Deferred, then the command buffer is held until it lands, so a config file can
+treat it as one blocking step. It cannot simply run to completion: crossing a
+map restart needs the map to load and cgame to start, which only happens across
+frames -- see CL_CheckPendingSeek, which finishes the job and releases the hold.
+
+Forward only. Backwards means restarting the demo and replaying into it, which
+the viewer does and rendering never needs: capture has not started.
 ====================
 */
+static int	cl_seekRequestedMs = 0;
+
 static void CL_SeekDemo_f( void ) {
 	int target;
 
@@ -1459,29 +1502,50 @@ static void CL_SeekDemo_f( void ) {
 		return;
 	}
 
-	target = cl_demoFirstTime + atoi( Cmd_Argv( 1 ) );
+	// Kept, because Cmd_Argv does not survive the seek: replaying the demo
+	// tokenizes every server command it passes, so by the time this reports a
+	// result argv(1) is whatever the last one happened to be. That is how a
+	// failure to reach 1020000 ms came to report "wanted 23 ms".
+	cl_seekRequestedMs = atoi( Cmd_Argv( 1 ) );
+	target = cl_demoFirstTime + cl_seekRequestedMs;
+
 	if ( target <= cl.snap.serverTime ) {
-		// Backwards would mean restarting the demo and replaying into it, which
-		// the viewer does and rendering never needs: capture has not started.
-		Com_Printf( "seekdemo: already at or past %s ms\n", Cmd_Argv( 1 ) );
+		Com_Printf( "seekdemo: already at or past %i ms\n", cl_seekRequestedMs );
 		return;
 	}
 
-	// No budget, so one step always finishes.
-	CL_DemoSeekStep( target, 0x7fffffff );
-	CL_DemoSeekFinish();
+	cl_demoSeekWasFrozen = cl_freezeDemo->integer;
+	Cvar_SetValue( "cl_freezeDemo", 0 );
+	cl_demoPendingSeek = target;
+
+	// Larger than any seek can take, and released by CL_CheckPendingSeek. The
+	// buffer ticks twice a frame, so this is minutes of frames even at the
+	// handful per second a 1440p render manages.
+	Cbuf_Wait( 100000 );
+}
+
+/*
+Report where a seek landed, once it has landed. Called from CL_CheckPendingSeek
+rather than from the command, which returns long before the answer is known.
+*/
+void CL_SeekDemoReport( void ) {
+	if ( !cl_seekRequestedMs ) {
+		return;		// nothing was asked for through the console
+	}
 
 	// Landing short has to be loud. A seek that quietly stopped early rendered
 	// the wrong part of the demo and reported success -- the run looked clean,
 	// the video was simply of somewhere else.
-	if ( cl.snap.serverTime < target ) {
-		Com_Printf( S_COLOR_RED "seekdemo: FAILED, wanted %s ms but stopped at %i "
-			"(%i of %i records)\n", Cmd_Argv( 1 ), cl.snap.serverTime - cl_demoFirstTime,
+	if ( cl.snap.serverTime - cl_demoFirstTime < cl_seekRequestedMs ) {
+		Com_Printf( S_COLOR_RED "seekdemo: FAILED, wanted %i ms but stopped at %i "
+			"(%i of %i records)\n", cl_seekRequestedMs,
+			cl.snap.serverTime - cl_demoFirstTime,
 			cl_demoRecordsRead, cl_demoTotalRecords );
 	} else {
 		Com_Printf( "seekdemo: at %i ms of the demo after %i of %i records\n",
 			cl.snap.serverTime - cl_demoFirstTime, cl_demoRecordsRead, cl_demoTotalRecords );
 	}
+	cl_seekRequestedMs = 0;
 
 	// Off the screen, not out of the log. Two reasons, and the second is the
 	// one that matters to anyone watching: the line above would otherwise sit
@@ -3434,8 +3498,8 @@ void CL_Frame ( int msec ) {
 			// if that restart fails there is nothing left to seek through -- the
 			// pending target would otherwise stay set forever and the page would
 			// sit on "seeking..." with no way out.
-			if ( cl_wasmPendingSeek >= 0 ) {
-				cl_wasmPendingSeek = -1;
+			if ( cl_demoPendingSeek >= 0 ) {
+				cl_demoPendingSeek = -1;
 				EM_ASM( { if (window.JKD_seekDone) { window.JKD_seekDone(); } } );
 			}
 			// Hand back the length we now know for certain, so a scrubber that
@@ -3451,10 +3515,13 @@ void CL_Frame ( int msec ) {
 #ifdef __EMSCRIPTEN__
 	else if ( cls.state != CA_DISCONNECTED ) {
 		cl_wasmReportedStop = qfalse;
-		// a backward seek restarted the demo; finish it now playback is live
-		CL_WasmCheckPendingSeek();
 	}
 #endif
+
+	// Drive any seek in flight. Every frame, and in both builds: a seek across
+	// a map restart needs the frames in between to reload, and the caller --
+	// page or config file -- is waiting on it either way.
+	CL_CheckPendingSeek();
 
 	// if recording an avi, lock to a fixed fps
 	if ( CL_VideoRecording() && cl_aviFrameRate->integer && msec) {

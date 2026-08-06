@@ -421,6 +421,12 @@ void Cbuf_Execute (void);
 // Pulls off \n terminated lines of text from the command buffer and sends
 // them through Cmd_ExecuteString.  Stops when the buffer is empty.
 // Normally called once per frame, but may be explicitly invoked.
+
+void Cbuf_Wait( int frames );
+// What the "wait" command sets, reachable from code. For an operation that a
+// config file has to treat as synchronous but that cannot finish inside one
+// call: hold the buffer with a count larger than the job can take, then release
+// it with 0 when the work is done. Demo seeking is the case that needed it.
 // Do not call inside a command function, or current args will be destroyed.
 
 //===========================================================================

@@ -36,6 +36,17 @@ void Cmd_Wait_f( void ) {
 	}
 }
 
+/*
+============
+Cbuf_Wait
+
+The same hold, set from code rather than from a command line. See qcommon.h.
+============
+*/
+void Cbuf_Wait( int frames ) {
+	cmd_wait = frames;
+}
+
 
 /*
 =============================================================================
