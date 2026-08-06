@@ -1,0 +1,145 @@
+name: HUD Test
+
+# What does the HUD actually look like in a native render?
+#
+# The render config had cg_draw2D 0 for a clean picture, which turns off
+# everything 2D at once -- health, shield, force, the "Following:" indicator
+# and the kill feed included. CG_Draw2D and the HUD drawing are all still
+# present in the fork's cgame (cg_draw.c) and only gated on cg_draw2D, so
+# turning it back on should restore them. The JS forwarding to the web page is
+# Emscripten-only and does not strip anything from a native build.
+#
+# Renders the same moment three ways so the difference is visible rather than
+# argued about.
+on:
+  workflow_dispatch:
+
+env:
+  ASSET_VERSION: "20260805"
+  R2_PUBLIC: "https://pub-76bff0ef02794a5d95b7e2a8b8660f61.r2.dev"
+  FPS: "30"
+
+jobs:
+  hud:
+    name: HUD on, off, and tidied
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true, fetch-depth: 0, path: jk2mv }
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake \
+            libsdl2-dev libgl1-mesa-dev libopenal-dev libjpeg-dev libpng-dev libminizip-dev \
+            xvfb libgl1-mesa-dri ffmpeg
+
+      - name: Build engine
+        run: |
+          cmake -S jk2mv -B jk2mv/build/actions \
+            -DCMAKE_BUILD_TYPE=Release -DUseInternalLibs=OFF -DBuildPortableVersion=ON
+          cmake --build jk2mv/build/actions -j"$(nproc)"
+
+      - name: Resolve game root
+        id: root
+        run: echo "ROOT=$GITHUB_WORKSPACE/jk2mv/build/actions/out/Release" >> "$GITHUB_OUTPUT"
+
+      - name: Restore game assets from cache
+        id: assetcache
+        uses: actions/cache@v4
+        with: { path: assets/base-min.tar, key: "jk2-assets-20260805" }
+
+      - name: Download game assets
+        if: steps.assetcache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p assets
+          curl -fsSL -o assets/base-min.tar "$R2_PUBLIC/render-assets/$ASSET_VERSION/base-min.tar"
+
+      - name: Stage
+        env: { ROOT: "${{ steps.root.outputs.ROOT }}" }
+        run: |
+          mkdir -p "$ROOT/base/demos"
+          tar -xf assets/base-min.tar -C "$ROOT/base"
+          curl -fsSL -o "$ROOT/base/demos/gate-demo.dm_15" \
+            "$R2_PUBLIC/render-assets/$ASSET_VERSION/gate-demo.dm_15"
+
+      - name: Render three HUD configurations
+        timeout-minutes: 40
+        env:
+          ROOT: ${{ steps.root.outputs.ROOT }}
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          SDL_AUDIODRIVER: "dummy"
+        run: |
+          set -u
+          # Follows a real player: slot 4 is occupied in this demo, and the
+          # "Following:" indicator only appears when the camera has a target.
+          pass () {
+            NAME="$1"; shift
+            {
+              echo "set com_hunkMegs 256"
+              echo "set r_mode -1"; echo "set r_customwidth 1920"; echo "set r_customheight 1080"
+              echo "set r_fullscreen 0"; echo "set r_swapInterval 0"
+              echo "set s_useOpenAL 0"
+              echo "set cl_aviFrameRate $FPS"
+              echo "set cl_aviMotionJpeg 1"; echo "set cl_aviMotionJpegQuality 95"
+              echo "set cg_fov 120"
+              echo "set cl_noprint 1"
+              echo ""
+              echo "demo gate-demo"
+              echo "wait 20"
+              echo "set cg_demoFollow 4"
+              echo "set cg_thirdPerson 1"; echo "set cg_thirdPersonRange 80"
+              echo "set cg_thirdPersonAngle 0"; echo "set cg_cameraOrbit 0"
+              for line in "$@"; do echo "$line"; done
+              echo "wait 200"
+              echo "video $NAME"
+              echo "wait 300"
+              echo "stopvideo"
+              echo "quit"
+            } > "$ROOT/base/$NAME.cfg"
+            xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+              "$ROOT/jk2mvmp" +set fs_basepath "$ROOT" +set fs_homepath "$ROOT" \
+              +exec "$NAME.cfg" >/dev/null 2>&1 || true
+            echo "rendered $NAME"
+          }
+
+          # What we ship today: nothing at all.
+          pass hud-off "set cg_draw2D 0"
+
+          # Everything the game would normally draw.
+          pass hud-on "set cg_draw2D 1"
+
+          # HUD kept, incidental clutter removed. Chat and the lag meter are
+          # noise on a published video; the scoreboard would cover the action.
+          pass hud-tidy \
+            "set cg_draw2D 1" \
+            "set cg_drawFPS 0" \
+            "set cg_lagometer 0" \
+            "set cg_drawTeamOverlay 0" \
+            "set cg_chatBeep 0" \
+            "set con_notifytime 0"
+
+          find "$ROOT" -name "*.avi" -exec ls -la {} \;
+
+      - name: Grab frames
+        env: { ROOT: "${{ steps.root.outputs.ROOT }}" }
+        run: |
+          mkdir -p out
+          find "$ROOT" -name "*.avi" -print0 | while IFS= read -r -d '' AVI; do
+            N=$(basename "$AVI" .avi)
+            ffmpeg -nostdin -y -i "$AVI" -c:v libx264 -crf 23 -preset veryfast \
+              -pix_fmt yuv420p -an "out/$N.mp4" >/dev/null 2>&1 || true
+            for T in 2 6; do
+              ffmpeg -nostdin -y -ss "$T" -i "out/$N.mp4" -frames:v 1 "out/$N-t$T.jpg" >/dev/null 2>&1 || true
+            done
+          done
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hud-test-output
+          path: out/
+          retention-days: 3
+          if-no-files-found: warn
