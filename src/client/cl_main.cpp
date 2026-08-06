@@ -25,36 +25,42 @@ cvar_t	*cl_debugMove;
 
 cvar_t	*cl_demoSuppressChat;
 
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
+/*
+Demo playback bookkeeping, and the forward seek built on it.
 
-// Latched so the page is told once when playback stops, not every frame.
-static qboolean	cl_wasmReportedStop = qfalse;
+Out here rather than inside the __EMSCRIPTEN__ block below because there are now
+two callers. The browser viewer scrubs with it; offline rendering uses it to
+reach the part of a long match someone actually asked for, instead of capturing
+the forty minutes of lead-in and throwing them away.
+
+Only the JS-facing wrappers are browser-specific. This is not.
+*/
+qboolean CL_GetServerCommand( int serverCommandNumber );
 
 // The last server time seen while a demo was playing, kept across the teardown
 // so the page can learn a demo's true length the first time it runs to the end.
 // Reaching the end is the only cheap way to know it: the format has no header
 // field for duration and no index, so anything else means a full parse.
-static int		cl_wasmFinalDemoTime = 0;
-static int		cl_wasmFirstDemoTime = 0;
+static int		cl_demoFinalTime = 0;
+static int		cl_demoFirstTime = 0;
 
 // Records consumed so far, and how many the file holds in total. Together these
 // give a usable duration without parsing the whole demo -- see
 // JKD_GetEstimatedDuration.
-int				cl_wasmRecordsRead = 0;
-static int		cl_wasmTotalRecords = -1;
+int				cl_demoRecordsRead = 0;
+static int		cl_demoTotalRecords = -1;
 // Our own copy of the demo name, because clc.demoName is MAX_QPATH (64) and
 // real community filenames are longer than that -- the one in hand is 88
 // characters of date, player, server, map and pipeline suffix. Truncation there
 // is silent and only shows up later, when something tries to open the file by
 // that name and fails: a backward seek can't restart the demo, and the duration
 // estimate can't count its records.
-static char		cl_wasmDemoName[MAX_OSPATH] = { 0 };
+static char		cl_demoFileName[MAX_OSPATH] = { 0 };
 
 // Records already consumed when the first snapshot landed. Everything before it
 // -- the gamestate and the configstrings -- carries no time, and counting those
 // against the elapsed clock is what makes an early rate estimate too slow.
-static int		cl_wasmFirstRecordIndex = -1;
+static int		cl_demoFirstRecordIndex = -1;
 
 /*
 Count the records in the demo without decoding any of them.
@@ -68,21 +74,21 @@ first frame.
 
 Opens its own handle so playback's file position is untouched.
 */
-static int CL_WasmCountDemoRecords( void ) {
+static int CL_CountDemoRecords( void ) {
 	fileHandle_t	f = 0;
 	char			name[MAX_OSPATH];
 	int				seq, len, count = 0;
 
-	if ( !cl_wasmDemoName[0] ) {
+	if ( !cl_demoFileName[0] ) {
 		return -1;
 	}
-	Com_sprintf( name, sizeof( name ), "demos/%s.dm_15", cl_wasmDemoName );
+	Com_sprintf( name, sizeof( name ), "demos/%s.dm_15", cl_demoFileName );
 	FS_FOpenFileRead( name, &f, qtrue );
 	if ( !f ) {
-		Com_sprintf( name, sizeof( name ), "demos/%s.dm_16", cl_wasmDemoName );
+		Com_sprintf( name, sizeof( name ), "demos/%s.dm_16", cl_demoFileName );
 		FS_FOpenFileRead( name, &f, qtrue );
 		if ( !f ) {
-			Com_sprintf( name, sizeof( name ), "demos/%s", cl_wasmDemoName );
+			Com_sprintf( name, sizeof( name ), "demos/%s", cl_demoFileName );
 			FS_FOpenFileRead( name, &f, qtrue );
 			if ( !f ) {
 				return -1;
@@ -111,6 +117,93 @@ static int CL_WasmCountDemoRecords( void ) {
 	return count;
 }
 
+/*
+Apply the reliable commands a seek has just skimmed past, and throw the text away.
+
+These are not only chat and console prints: configstring updates arrive this way
+too, and CL_GetServerCommand is what folds them into cl.gameState. Skipping them
+loses every player's name and team -- the POV picker empties out and the
+scoreboard forgets who is playing. Draining them here applies those side effects
+while cgame never sees the messages themselves, which is right: they are the
+history of a stretch the viewer just jumped over.
+
+It also keeps the ring from overflowing. It holds only the last handful, and
+cgame asking later for one that has been cycled out is fatal.
+*/
+static void CL_DrainServerCommands( void ) {
+	while ( clc.lastExecutedServerCommand < clc.serverCommandSequence ) {
+		CL_GetServerCommand( clc.lastExecutedServerCommand + 1 );
+	}
+}
+
+// Advance towards a seek target for at most `budgetMs`, and report whether it
+// was reached. Sliced rather than run to completion because a long seek is
+// genuinely slow in wall-clock terms even at two thousand times realtime --
+// crossing two and a half hours of demo takes about nine seconds -- and doing
+// that inside one call freezes the page for the duration, with no repaint and
+// no way to show progress. Which looks exactly like a scrubber that does nothing.
+static qboolean CL_DemoSeekStep( int targetTime, int budgetMs ) {
+	int deadline = Sys_Milliseconds() + budgetMs;
+	int checked = 0;
+
+	// Reading past the last record ends playback outright, so a seek must never
+	// be allowed to reach it. Any timeline range is a guess until a demo has run
+	// through once -- the format states no duration -- so dragging to the end of
+	// the bar would otherwise stop the demo rather than take you to its end.
+	// The record count is exact even when the duration derived from it isn't.
+	if ( cl_demoTotalRecords < 0 ) {
+		cl_demoTotalRecords = CL_CountDemoRecords();
+	}
+
+	while ( cls.state == CA_ACTIVE && cl.snap.serverTime < targetTime ) {
+		int before = cl.snap.serverTime;
+
+		if ( cl_demoTotalRecords > 0 && cl_demoRecordsRead >= cl_demoTotalRecords - 1 ) {
+			break;		// hold on the final frame rather than falling off the end
+		}
+		CL_ReadDemoMessage();
+		CL_DrainServerCommands();
+		if ( cl.snap.serverTime == before ) {
+			break;		// end of demo, or a stream that isn't advancing
+		}
+		// Sys_Milliseconds is not free, so don't ask it every record
+		if ( ( ++checked & 255 ) == 0 && Sys_Milliseconds() >= deadline ) {
+			return qfalse;		// more to do; resume next frame
+		}
+	}
+	return qtrue;
+}
+
+static void CL_DemoSeekFinish( void ) {
+	if ( cls.state == CA_ACTIVE ) {
+		// Commands are drained as the seek runs (see CL_DrainServerCommands),
+		// so there is no backlog left here and, more to the point, the
+		// configstrings they carried have been applied rather than discarded.
+		CL_DrainServerCommands();
+
+		// Re-anchor playback: cl.serverTime is derived from realtime plus this
+		// delta every frame, so without it the demo would snap straight back.
+		cl.serverTime = cl.snap.serverTime;
+		cl.serverTimeDelta = cl.snap.serverTime - cls.realtime;
+		cl.oldFrameServerTime = cl.snap.serverTime;
+		cl.oldServerTime = cl.snap.serverTime;
+	}
+
+	// Sounds are started by cgame from entity events, and cgame doesn't run
+	// during the pump above -- so nothing fires as we skim past thousands of
+	// snapshots. This just clears anything already in flight when the seek began,
+	// so a saber hum from the old position doesn't survive the jump.
+	S_StopAllSounds();
+}
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+
+// Latched so the page is told once when playback stops, not every frame.
+static qboolean	cl_wasmReportedStop = qfalse;
+
+
+
 extern "C" {
 // Current demo playback position, in server milliseconds, or -1 when no demo is
 // playing. Lets the page show/verify playback progress -- and it's the value a
@@ -137,8 +230,8 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetDemoTime( void ) {
 	was hopeless. The parser anchors both values together; this only ever
 	widens the range once that has happened.
 	*/
-	if ( cl_wasmFirstDemoTime && cl.serverTime > cl_wasmFinalDemoTime ) {
-		cl_wasmFinalDemoTime = cl.serverTime;
+	if ( cl_demoFirstTime && cl.serverTime > cl_demoFinalTime ) {
+		cl_demoFinalTime = cl.serverTime;
 	}
 	return cl.serverTime;
 }
@@ -150,10 +243,10 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetDemoTime( void ) {
 EMSCRIPTEN_KEEPALIVE int JKD_GetElapsedTime( void ) {
 	int now = JKD_GetDemoTime();
 
-	if ( now < 0 || !cl_wasmFirstDemoTime ) {
+	if ( now < 0 || !cl_demoFirstTime ) {
 		return -1;
 	}
-	return now - cl_wasmFirstDemoTime;
+	return now - cl_demoFirstTime;
 }
 
 // The match clock, in milliseconds since the level started, or -1 if the demo
@@ -186,10 +279,10 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetMatchTime( void ) {
 // to the end this is its real length, which lets a scrubber correct a range it
 // was given wrongly -- or had to guess at.
 EMSCRIPTEN_KEEPALIVE int JKD_GetFurthestTime( void ) {
-	if ( !cl_wasmFirstDemoTime ) {
+	if ( !cl_demoFirstTime ) {
 		return 0;
 	}
-	return cl_wasmFinalDemoTime - cl_wasmFirstDemoTime;
+	return cl_demoFinalTime - cl_demoFirstTime;
 }
 
 // Estimated total length in milliseconds, from the ratio of records consumed to
@@ -200,14 +293,14 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetFurthestTime( void ) {
 EMSCRIPTEN_KEEPALIVE int JKD_GetEstimatedDuration( void ) {
 	int elapsed;
 
-	if ( cl_wasmTotalRecords < 0 ) {
-		cl_wasmTotalRecords = CL_WasmCountDemoRecords();
+	if ( cl_demoTotalRecords < 0 ) {
+		cl_demoTotalRecords = CL_CountDemoRecords();
 	}
-	if ( cl_wasmTotalRecords <= 0 ) {
+	if ( cl_demoTotalRecords <= 0 ) {
 		return 0;
 	}
-	elapsed = cl_wasmFinalDemoTime - cl_wasmFirstDemoTime;
-	if ( cl_wasmRecordsRead >= cl_wasmTotalRecords && elapsed > 0 ) {
+	elapsed = cl_demoFinalTime - cl_demoFirstTime;
+	if ( cl_demoRecordsRead >= cl_demoTotalRecords && elapsed > 0 ) {
 		return elapsed;		// the whole file has been read: this is exact
 	}
 
@@ -218,21 +311,21 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetEstimatedDuration( void ) {
 	// been wrong here anyway: 20Hz is the common JK2 setting, but the 2018 demo
 	// in hand runs at 30.
 	{
-		int sampled = cl_wasmRecordsRead - cl_wasmFirstRecordIndex;
+		int sampled = cl_demoRecordsRead - cl_demoFirstRecordIndex;
 		// Measured against the *current* position, not the furthest ever reached:
 		// a backward seek restarts the file, so the record count goes back to the
 		// beginning while the high-water mark stays where it was, and pairing the
 		// two would put the rate out by the size of the jump.
 		int span = ( clc.demoplaying && cl.snap.valid )
-			? cl.serverTime - cl_wasmFirstDemoTime : 0;
+			? cl.serverTime - cl_demoFirstTime : 0;
 
-		if ( cl_wasmFirstRecordIndex >= 0 && sampled >= 20 && span > 0 ) {
+		if ( cl_demoFirstRecordIndex >= 0 && sampled >= 20 && span > 0 ) {
 			double perRecord = (double)span / (double)sampled;
-			return (int)( perRecord * (double)( cl_wasmTotalRecords - cl_wasmFirstRecordIndex ) );
+			return (int)( perRecord * (double)( cl_demoTotalRecords - cl_demoFirstRecordIndex ) );
 		}
 	}
 	// nothing sampled yet -- 20Hz is the usual JK2 rate and beats no range at all
-	return cl_wasmTotalRecords * 50;
+	return cl_demoTotalRecords * 50;
 }
 
 // Which *player* entities the current snapshot actually carries, as a bitmask of
@@ -336,84 +429,6 @@ extern "C++" qboolean CL_GetServerCommand( int serverCommandNumber );
 extern "C++" void CL_Record_f( void );
 extern "C++" void CL_StopRecord_f( void );
 
-/*
-Apply the reliable commands a seek has just skimmed past, and throw the text away.
-
-These are not only chat and console prints: configstring updates arrive this way
-too, and CL_GetServerCommand is what folds them into cl.gameState. Skipping them
-loses every player's name and team -- the POV picker empties out and the
-scoreboard forgets who is playing. Draining them here applies those side effects
-while cgame never sees the messages themselves, which is right: they are the
-history of a stretch the viewer just jumped over.
-
-It also keeps the ring from overflowing. It holds only the last handful, and
-cgame asking later for one that has been cycled out is fatal.
-*/
-static void CL_WasmDrainServerCommands( void ) {
-	while ( clc.lastExecutedServerCommand < clc.serverCommandSequence ) {
-		CL_GetServerCommand( clc.lastExecutedServerCommand + 1 );
-	}
-}
-
-// Advance towards a seek target for at most `budgetMs`, and report whether it
-// was reached. Sliced rather than run to completion because a long seek is
-// genuinely slow in wall-clock terms even at two thousand times realtime --
-// crossing two and a half hours of demo takes about nine seconds -- and doing
-// that inside one call freezes the page for the duration, with no repaint and
-// no way to show progress. Which looks exactly like a scrubber that does nothing.
-static qboolean CL_WasmSeekStep( int targetTime, int budgetMs ) {
-	int deadline = Sys_Milliseconds() + budgetMs;
-	int checked = 0;
-
-	// Reading past the last record ends playback outright, so a seek must never
-	// be allowed to reach it. Any timeline range is a guess until a demo has run
-	// through once -- the format states no duration -- so dragging to the end of
-	// the bar would otherwise stop the demo rather than take you to its end.
-	// The record count is exact even when the duration derived from it isn't.
-	if ( cl_wasmTotalRecords < 0 ) {
-		cl_wasmTotalRecords = CL_WasmCountDemoRecords();
-	}
-
-	while ( cls.state == CA_ACTIVE && cl.snap.serverTime < targetTime ) {
-		int before = cl.snap.serverTime;
-
-		if ( cl_wasmTotalRecords > 0 && cl_wasmRecordsRead >= cl_wasmTotalRecords - 1 ) {
-			break;		// hold on the final frame rather than falling off the end
-		}
-		CL_ReadDemoMessage();
-		CL_WasmDrainServerCommands();
-		if ( cl.snap.serverTime == before ) {
-			break;		// end of demo, or a stream that isn't advancing
-		}
-		// Sys_Milliseconds is not free, so don't ask it every record
-		if ( ( ++checked & 255 ) == 0 && Sys_Milliseconds() >= deadline ) {
-			return qfalse;		// more to do; resume next frame
-		}
-	}
-	return qtrue;
-}
-
-static void CL_WasmSeekFinish( void ) {
-	if ( cls.state == CA_ACTIVE ) {
-		// Commands are drained as the seek runs (see CL_WasmDrainServerCommands),
-		// so there is no backlog left here and, more to the point, the
-		// configstrings they carried have been applied rather than discarded.
-		CL_WasmDrainServerCommands();
-
-		// Re-anchor playback: cl.serverTime is derived from realtime plus this
-		// delta every frame, so without it the demo would snap straight back.
-		cl.serverTime = cl.snap.serverTime;
-		cl.serverTimeDelta = cl.snap.serverTime - cls.realtime;
-		cl.oldFrameServerTime = cl.snap.serverTime;
-		cl.oldServerTime = cl.snap.serverTime;
-	}
-
-	// Sounds are started by cgame from entity events, and cgame doesn't run
-	// during the pump above -- so nothing fires as we skim past thousands of
-	// snapshots. This just clears anything already in flight when the seek began,
-	// so a saber hum from the old position doesn't survive the jump.
-	S_StopAllSounds();
-}
 
 // Drive an in-progress seek. Called once per frame, so the browser keeps
 // painting and the page can show how far along it is.
@@ -423,10 +438,10 @@ void CL_WasmCheckPendingSeek( void ) {
 	}
 	// A frame's worth of parsing at a time. Long enough to cross hours of demo
 	// in a handful of frames, short enough that the page stays responsive.
-	if ( !CL_WasmSeekStep( cl_wasmPendingSeek, 30 ) ) {
+	if ( !CL_DemoSeekStep( cl_wasmPendingSeek, 30 ) ) {
 		return;
 	}
-	CL_WasmSeekFinish();
+	CL_DemoSeekFinish();
 	cl_wasmPendingSeek = -1;
 	// Back to however the viewer had it: a seek started from a paused demo
 	// should land paused, not start playing on its own.
@@ -455,7 +470,7 @@ EMSCRIPTEN_KEEPALIVE int JKD_SeekTo( int targetTime ) {
 		// message before it -- so the demo restarts and replays from the top.
 		// Queued through the command buffer so the teardown, which rebuilds
 		// cgame, happens between frames rather than under this call.
-		Cbuf_ExecuteText( EXEC_APPEND, va( "demo \"%s\"\n", cl_wasmDemoName ) );
+		Cbuf_ExecuteText( EXEC_APPEND, va( "demo \"%s\"\n", cl_demoFileName ) );
 	}
 	return -1;
 }
@@ -1347,11 +1362,10 @@ void CL_ReadDemoMessage( void ) {
 
 	clc.lastPacketTime = cls.realtime;
 	buf.readcount = 0;
-#ifdef __EMSCRIPTEN__
 	// counted so a duration can be estimated from the ratio of records consumed
-	// to records in the file, without parsing the whole thing up front
-	cl_wasmRecordsRead++;
-#endif
+	// to records in the file, without parsing the whole thing up front -- and so
+	// a seek can tell how near the end of the file it is
+	cl_demoRecordsRead++;
 #ifdef __EMSCRIPTEN__
 	// Noted before the parse so the trim can tell which server commands arrived
 	// in *this* message: a frame it has to rewrite must carry its own.
@@ -1369,24 +1383,75 @@ void CL_ReadDemoMessage( void ) {
 	CL_WasmWriteTrimMessage( &buf, commandsBefore + 1, clc.serverCommandSequence );
 #endif
 
-#ifdef __EMSCRIPTEN__
 	// Take the rate baseline here, at the record the first snapshot arrives on,
 	// rather than lazily when something asks for it. A seek replays thousands of
 	// records inside a single frame, so a lazy baseline would be captured
 	// somewhere in the middle of that replay -- leaving a long elapsed time
 	// divided by a handful of records, and a duration estimate several times too
 	// large.
-	if ( cl_wasmFirstRecordIndex < 0 && clc.demoplaying && cl.snap.valid && cl.snap.serverTime ) {
-		cl_wasmFirstRecordIndex = cl_wasmRecordsRead;
-		if ( !cl_wasmFirstDemoTime ) {
+	//
+	// cl_demoFirstTime is also what makes "seekdemo 90000" mean ninety seconds
+	// into the recording rather than ninety seconds past the epoch of whatever
+	// server clock it happens to carry.
+	if ( cl_demoFirstRecordIndex < 0 && clc.demoplaying && cl.snap.valid && cl.snap.serverTime ) {
+		cl_demoFirstRecordIndex = cl_demoRecordsRead;
+		if ( !cl_demoFirstTime ) {
 			// Both ends of the range are anchored together, from the same
 			// snapshot of the same recording -- see JKD_GetDemoTime for what
 			// went wrong when they could be set from different demos.
-			cl_wasmFirstDemoTime = cl.snap.serverTime;
-			cl_wasmFinalDemoTime = cl.snap.serverTime;
+			cl_demoFirstTime = cl.snap.serverTime;
+			cl_demoFinalTime = cl.snap.serverTime;
 		}
 	}
-#endif
+}
+
+/*
+====================
+CL_SeekDemo_f
+
+seekdemo <ms>
+
+Jump forward to <ms> measured from the start of the recording, for offline
+rendering. Someone asking for thirty seconds from an hour into a match should
+not cost an hour of capture: without this the workflow renders the whole
+lead-in and throws it away, which is both slow and, at 1440p, more intermediate
+video than a CI runner has disk for.
+
+Run to completion here rather than sliced across frames the way the viewer does
+it. There is no page to keep repainting, and the caller is a config file, so
+the seek has to be finished by the time the next command runs.
+====================
+*/
+static void CL_SeekDemo_f( void ) {
+	int target;
+
+	if ( Cmd_Argc() != 2 ) {
+		Com_Printf( "usage: seekdemo <milliseconds from the start of the demo>\n" );
+		return;
+	}
+	// cl.snap.valid, not just demoplaying: the first snapshot is what sets
+	// cl_demoFirstTime, and without it there is nothing to measure from. A cfg
+	// therefore has to let the demo start before seeking -- a few frames of
+	// wait is enough.
+	if ( !clc.demoplaying || !cl.snap.valid || !cl_demoFirstTime ) {
+		Com_Printf( "seekdemo: no demo is playing yet\n" );
+		return;
+	}
+
+	target = cl_demoFirstTime + atoi( Cmd_Argv( 1 ) );
+	if ( target <= cl.snap.serverTime ) {
+		// Backwards would mean restarting the demo and replaying into it, which
+		// the viewer does and rendering never needs: capture has not started.
+		Com_Printf( "seekdemo: already at or past %s ms\n", Cmd_Argv( 1 ) );
+		return;
+	}
+
+	// No budget, so one step always finishes.
+	CL_DemoSeekStep( target, 0x7fffffff );
+	CL_DemoSeekFinish();
+
+	Com_Printf( "seekdemo: at %i ms of the demo after %i records\n",
+		cl.snap.serverTime - cl_demoFirstTime, cl_demoRecordsRead );
 }
 
 /*
@@ -1470,20 +1535,19 @@ void CL_PlayDemo_f( void ) {
 	}
 	Q_strncpyz( clc.demoName, arg, sizeof( clc.demoName ) );
 
-#ifdef __EMSCRIPTEN__
 	// Reading restarts from the top, so the consumed count has to as well or the
 	// duration estimate drifts. The times either side of it are absolute server
 	// times and identical across restarts of the same demo, so the high-water
 	// mark a backward seek was launched from is deliberately kept.
-	cl_wasmRecordsRead = 0;
-	cl_wasmFirstRecordIndex = -1;
+	cl_demoRecordsRead = 0;
+	cl_demoFirstRecordIndex = -1;
 	// A *different* demo is the one case where keeping them is wrong: they are
 	// absolute server times from the old recording, so elapsed would be measured
 	// against a file that is no longer open. The page can swap demos without
 	// reloading (the engine outlives a route change), so this really happens.
-	if ( Q_stricmp( arg, cl_wasmDemoName ) ) {
-		cl_wasmFirstDemoTime = 0;
-		cl_wasmFinalDemoTime = 0;
+	if ( Q_stricmp( arg, cl_demoFileName ) ) {
+		cl_demoFirstTime = 0;
+		cl_demoFinalTime = 0;
 		/*
 		And the record count, which is counted once and then cached forever.
 		Left alone, every demo opened after the first has its length estimated
@@ -1493,11 +1557,10 @@ void CL_PlayDemo_f( void ) {
 		change of file: re-opening the same demo, which is how a backward seek
 		works, is counting the same records again.
 		*/
-		cl_wasmTotalRecords = -1;
+		cl_demoTotalRecords = -1;
 	}
 	// taken from arg, not clc.demoName, which has already been truncated by now
-	Q_strncpyz( cl_wasmDemoName, arg, sizeof( cl_wasmDemoName ) );
-#endif
+	Q_strncpyz( cl_demoFileName, arg, sizeof( cl_demoFileName ) );
 
 	Con_Close();
 
@@ -3342,7 +3405,7 @@ void CL_Frame ( int msec ) {
 			// was working from a guess can correct itself.
 			EM_ASM( {
 				if (window.JKD_playbackStopped) { window.JKD_playbackStopped($0); }
-			}, cl_wasmFirstDemoTime ? cl_wasmFinalDemoTime - cl_wasmFirstDemoTime : 0 );
+			}, cl_demoFirstTime ? cl_demoFinalTime - cl_demoFirstTime : 0 );
 		}
 #else
 		VM_Call( uivm, UI_SET_ACTIVE_MENU, UIMENU_MAIN );
@@ -3957,6 +4020,7 @@ void CL_Init( void ) {
 	Cmd_AddCommand ("disconnect", CL_Disconnect_f);
 	Cmd_AddCommand ("record", CL_Record_f);
 	Cmd_AddCommand ("demo", CL_PlayDemo_f);
+	Cmd_AddCommand ("seekdemo", CL_SeekDemo_f);
 	Cmd_SetCommandCompletionFunc( "demo", CL_CompleteDemoName );
 	Cmd_AddCommand ("cinematic", CL_PlayCinematic_f);
 	Cmd_AddCommand ("stoprecord", CL_StopRecord_f);
