@@ -145,6 +145,7 @@ static void CL_DrainServerCommands( void ) {
 static qboolean CL_DemoSeekStep( int targetTime, int budgetMs ) {
 	int deadline = Sys_Milliseconds() + budgetMs;
 	int checked = 0;
+	int stalled = 0;
 
 	// Reading past the last record ends playback outright, so a seek must never
 	// be allowed to reach it. Any timeline range is a guess until a demo has run
@@ -163,8 +164,28 @@ static qboolean CL_DemoSeekStep( int targetTime, int budgetMs ) {
 		}
 		CL_ReadDemoMessage();
 		CL_DrainServerCommands();
+
+		/*
+		A message that doesn't move the clock is not the end of the demo.
+
+		Snapshots delta'd from a frame the client no longer holds get dropped,
+		and a run of them is ordinary around a map restart or a burst of
+		configstrings -- the 20-minute match demo used to test this has one
+		about fourteen seconds in, right where warmup ends.
+
+		Stopping at the first of those and reporting success is what made
+		"seek to seventeen minutes" quietly render from fourteen seconds. The
+		record count above is the real end of the file and it is exact, so all
+		this has to catch is a stream that has genuinely stopped moving. A few
+		hundred records is far more than a restart costs and still finite when
+		the count is unknown.
+		*/
 		if ( cl.snap.serverTime == before ) {
-			break;		// end of demo, or a stream that isn't advancing
+			if ( ++stalled > 512 ) {
+				break;
+			}
+		} else {
+			stalled = 0;
 		}
 		// Sys_Milliseconds is not free, so don't ask it every record
 		if ( ( ++checked & 255 ) == 0 && Sys_Milliseconds() >= deadline ) {
@@ -1450,8 +1471,24 @@ static void CL_SeekDemo_f( void ) {
 	CL_DemoSeekStep( target, 0x7fffffff );
 	CL_DemoSeekFinish();
 
-	Com_Printf( "seekdemo: at %i ms of the demo after %i records\n",
-		cl.snap.serverTime - cl_demoFirstTime, cl_demoRecordsRead );
+	// Landing short has to be loud. A seek that quietly stopped early rendered
+	// the wrong part of the demo and reported success -- the run looked clean,
+	// the video was simply of somewhere else.
+	if ( cl.snap.serverTime < target ) {
+		Com_Printf( S_COLOR_RED "seekdemo: FAILED, wanted %s ms but stopped at %i "
+			"(%i of %i records)\n", Cmd_Argv( 1 ), cl.snap.serverTime - cl_demoFirstTime,
+			cl_demoRecordsRead, cl_demoTotalRecords );
+	} else {
+		Com_Printf( "seekdemo: at %i ms of the demo after %i of %i records\n",
+			cl.snap.serverTime - cl_demoFirstTime, cl_demoRecordsRead, cl_demoTotalRecords );
+	}
+
+	// Off the screen, not out of the log. Two reasons, and the second is the
+	// one that matters to anyone watching: the line above would otherwise sit
+	// in the notify area for con_notifytime seconds, which during a render is
+	// the opening seconds of the video -- and the kill feed from before the
+	// seek would hang around too, seventeen minutes stale.
+	Con_ClearNotify();
 }
 
 /*
