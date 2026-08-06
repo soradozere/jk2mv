@@ -62,8 +62,12 @@ jobs:
         run: |
           mkdir -p "$ROOT/base/demos"
           tar -xf assets/base-min.tar -C "$ROOT/base"
+          # "Owned cheese" on ctf_yavin_no_outside. The gate demo is an FFA
+          # saber brawl -- constant clashes and light plumes, so any single
+          # frame from two separate runs is a coin toss rather than a
+          # comparison.
           curl -fsSL -o "$ROOT/base/demos/gate-demo.dm_15" \
-            "$R2_PUBLIC/render-assets/$ASSET_VERSION/gate-demo.dm_15"
+            "$R2_PUBLIC/demos/76419644-7ca3-4632-8086-cbe80e9c0969.dm_15"
 
       - name: Render at both intensities
         timeout-minutes: 40
@@ -87,12 +91,12 @@ jobs:
               echo ""
               echo "demo gate-demo"
               echo "wait 20"
-              echo "set cg_demoFollow 4"
+              echo "set cg_demoFollow -1"
               echo "set cg_thirdPerson 1"; echo "set cg_thirdPersonRange 80"
               echo "set cg_thirdPersonAngle 0"; echo "set cg_cameraOrbit 0"
               echo "wait 200"
               echo "video $NAME"
-              echo "wait 200"
+              echo "wait 1200"
               echo "stopvideo"
               echo "quit"
             } > "$ROOT/base/$NAME.cfg"
@@ -118,11 +122,17 @@ jobs:
             N=$(basename "$AVI" .avi)
             ffmpeg -nostdin -y -i "$AVI" -c:v libx264 -crf 20 -preset veryfast \
               -pix_fmt yuv420p -an "out/$N.mp4" >/dev/null 2>&1 || true
-            ffmpeg -nostdin -y -ss 3 -i "out/$N.mp4" -frames:v 1 "out/$N.jpg" >/dev/null 2>&1 || true
-            # Mean luminance, so the difference is a number as well as a picture.
-            echo -n "$N mean brightness: "
-            ffmpeg -nostdin -i "out/$N.mp4" -vf "format=gray,signalstats,metadata=print:key=lavfi.signalstats.YAVG" \
-              -frames:v 30 -f null - 2>&1 | grep -o "YAVG=[0-9.]*" | tail -1 || echo "n/a"
+            for T in 2 6 10 14; do
+              ffmpeg -nostdin -y -ss "$T" -i "out/$N.mp4" -frames:v 1 "out/$N-t$T.jpg" >/dev/null 2>&1 || true
+            done
+            # Averaged over the whole clip, not a sample. A single frame from
+            # two separate runs lands on different demo moments, so a transient
+            # like a saber clash decides the result instead of the setting.
+            echo -n "$N mean brightness over the whole clip: "
+            ffmpeg -nostdin -i "out/$N.mp4" \
+              -vf "format=gray,signalstats,metadata=print:key=lavfi.signalstats.YAVG" \
+              -f null - 2>&1 | grep -o "YAVG=[0-9.]*" | cut -d= -f2 \
+              | awk '{s+=$1; n++} END {if(n) printf "%.2f  (%d frames)\n", s/n, n; else print "n/a"}'
           done
           ls -la out/
 
