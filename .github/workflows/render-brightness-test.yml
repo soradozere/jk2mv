@@ -1,18 +1,29 @@
 name: Brightness Test
 
-# Are native renders darker than the same demo in the browser?
+# Renders come out dark. Which lever actually reaches the captured frames?
 #
-# tr_init.cpp sets r_intensity 2 under __EMSCRIPTEN__ and 1 otherwise, with a
-# comment explaining why: overbright normally arrives via the hardware gamma
-# ramp, a canvas has none, so the browser gets that stop back in software.
+# Established by reading tr_image.cpp and the last run's log rather than guessed:
 #
-# A headless X server under llvmpipe has no usable gamma ramp either, so the
-# native render build may be falling into the same gap while keeping the
-# setting meant for hardware that can do it -- which would make every render a
-# stop darker than the site.
+#   - postprocessing gamma needs ARB assembly programs llvmpipe does not have,
+#     so r_gammamethod falls back to hardware ("falling back to hardware gamma"
+#     in run 31104091183)
+#   - hardware gamma + windowed forces tr.overbrightBits to 0, which is the stop
+#     the picture is missing
+#   - and R_LightScaleTexture only folds s_gammatable into textures when
+#     r_gammamethod is NONE. Under hardware it goes to the display ramp instead,
+#     and an AVI is read back from the framebuffer long before any display ramp
 #
-# Renders the same moment at both values and reports which gamma method the
-# engine actually chose, so the answer comes from frames rather than reasoning.
+# So r_gamma has never done anything to a render, and r_intensity -- a flat
+# multiply that clips at 255 -- has been the only lever. That is why intensity 2
+# blew out the skybox while the dark parts stayed dark.
+#
+# r_gammamethod 0 is the untried one: it takes the branch that bakes the curve
+# into the textures, so it reaches the capture, and being a curve it lifts
+# shadows and midtones while leaving highlights near white alone.
+#
+# Renders the same window five ways and reports mean brightness over the whole
+# clip. Not a single frame: the last attempt at this landed on a saber clash and
+# compared a light plume against an empty corridor.
 on:
   workflow_dispatch:
 
@@ -22,7 +33,7 @@ env:
 
 jobs:
   brightness:
-    name: r_intensity 1 vs 2
+    name: Which lever reaches the frames
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -62,23 +73,23 @@ jobs:
         run: |
           mkdir -p "$ROOT/base/demos"
           tar -xf assets/base-min.tar -C "$ROOT/base"
-          # "Owned cheese" on ctf_yavin_no_outside. The gate demo is an FFA
-          # saber brawl -- constant clashes and light plumes, so any single
-          # frame from two separate runs is a coin toss rather than a
-          # comparison.
+          # "Owned cheese" on ctf_yavin_no_outside -- a calm stretch with sky in
+          # shot, which is the thing that blew out last time.
           curl -fsSL -o "$ROOT/base/demos/gate-demo.dm_15" \
             "$R2_PUBLIC/demos/76419644-7ca3-4632-8086-cbe80e9c0969.dm_15"
 
-      - name: Render at both intensities
-        timeout-minutes: 40
+      - name: Render each candidate
+        timeout-minutes: 60
         env:
           ROOT: ${{ steps.root.outputs.ROOT }}
           LIBGL_ALWAYS_SOFTWARE: "1"
           SDL_AUDIODRIVER: "dummy"
         run: |
           set -u
+          # 720p: brightness does not depend on resolution, and this is four
+          # times cheaper than the 1440p production renders.
           pass () {
-            NAME="$1"; INTENSITY="$2"
+            NAME="$1"; shift
             {
               echo "set com_hunkMegs 256"
               echo "set r_mode -1"; echo "set r_customwidth 1280"; echo "set r_customheight 720"
@@ -101,38 +112,71 @@ jobs:
               echo "quit"
             } > "$ROOT/base/$NAME.cfg"
 
-            # r_intensity is CVAR_LATCH, so it has to be set before the renderer
-            # starts -- setting it inside the cfg would be read too late and
-            # silently do nothing.
+            # All of these are read when textures are uploaded, which happens
+            # before a cfg gets a chance to run -- r_intensity and r_gammamethod
+            # are CVAR_LATCH besides. Command line only.
             xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" \
               "$ROOT/jk2mvmp" +set fs_basepath "$ROOT" +set fs_homepath "$ROOT" \
-              +set r_intensity "$INTENSITY" \
-              +exec "$NAME.cfg" 2>&1 | grep -iE "gamma|intensity|overbright" | head -8
-            echo "--- rendered $NAME at r_intensity $INTENSITY"
+              "$@" \
+              +exec "$NAME.cfg" 2>&1 | grep -iE "gamma method|gamma correction not supported|overbright" | head -4
+            echo "--- rendered $NAME with $*"
           }
 
-          pass intensity-1 1
-          pass intensity-2 2
+          # The one in production now.
+          pass baseline           +set r_intensity 1
+          # The rejected one, for scale: this is the skybox that washed out.
+          pass intensity-2        +set r_intensity 2
+          # The untried branch, two strengths.
+          pass gamma-1.2          +set r_gammamethod 0 +set r_gamma 1.2 +set r_intensity 1
+          pass gamma-1.5          +set r_gammamethod 0 +set r_gamma 1.5 +set r_intensity 1
+          # Gamma plus the overbright stop that windowed mode threw away.
+          pass gamma-1.3-ob       +set r_gammamethod 0 +set r_gamma 1.3 +set r_intensity 1 +set r_overBrightBits 1
 
-      - name: Extract frames
+      - name: Measure
         env: { ROOT: "${{ steps.root.outputs.ROOT }}" }
         run: |
+          set -u
           mkdir -p out
-          find "$ROOT" -name "*.avi" -print0 | while IFS= read -r -d '' AVI; do
+          measure () {
+            f="$1"; label="$2"
+            printf '%-16s ' "$label"
+            ffmpeg -nostdin -i "$f" \
+              -vf "format=gray,signalstats,metadata=print:key=lavfi.signalstats.YAVG" \
+              -f null - 2>&1 | grep -o "YAVG=[0-9.]*" | cut -d= -f2 \
+              | awk '{s+=$1; n++} END {if(n) printf "mean %.2f over %d frames\n", s/n, n; else print "n/a"}'
+          }
+
+          echo "=============================================="
+          for AVI in $(ls -1 "$ROOT"/base/videos/*.avi | sort); do
             N=$(basename "$AVI" .avi)
             ffmpeg -nostdin -y -i "$AVI" -c:v libx264 -crf 20 -preset veryfast \
               -pix_fmt yuv420p -an "out/$N.mp4" >/dev/null 2>&1 || true
-            for T in 2 6 10 14; do
-              ffmpeg -nostdin -y -ss "$T" -i "out/$N.mp4" -frames:v 1 "out/$N-t$T.jpg" >/dev/null 2>&1 || true
-            done
-            # Averaged over the whole clip, not a sample. A single frame from
-            # two separate runs lands on different demo moments, so a transient
-            # like a saber clash decides the result instead of the setting.
-            echo -n "$N mean brightness over the whole clip: "
-            ffmpeg -nostdin -i "out/$N.mp4" \
-              -vf "format=gray,signalstats,metadata=print:key=lavfi.signalstats.YAVG" \
-              -f null - 2>&1 | grep -o "YAVG=[0-9.]*" | cut -d= -f2 \
-              | awk '{s+=$1; n++} END {if(n) printf "%.2f  (%d frames)\n", s/n, n; else print "n/a"}'
+            measure "out/$N.mp4" "$N"
+            # Same frame from every pass, for eyeballing. The clip is calm here.
+            ffmpeg -nostdin -y -ss 8 -i "out/$N.mp4" -frames:v 1 "out/$N.jpg" >/dev/null 2>&1 || true
+          done
+
+          # The other way to do it entirely: leave the engine alone and lift the
+          # final encode. Included so the comparison is honest -- if this looks
+          # as good, it needs no engine change at all.
+          if [ -f out/baseline.mp4 ]; then
+            ffmpeg -nostdin -y -i out/baseline.mp4 -vf "eq=gamma=1.3" \
+              -c:v libx264 -crf 20 -preset veryfast -pix_fmt yuv420p -an \
+              out/ffmpeg-gamma-1.3.mp4 >/dev/null 2>&1 || true
+            measure out/ffmpeg-gamma-1.3.mp4 "ffmpeg-gamma"
+            ffmpeg -nostdin -y -ss 8 -i out/ffmpeg-gamma-1.3.mp4 -frames:v 1 \
+              out/ffmpeg-gamma-1.3.jpg >/dev/null 2>&1 || true
+          fi
+          echo "=============================================="
+
+          # Highlight clipping is the thing that killed intensity 2, and a mean
+          # cannot show it: a washed sky and a brighter room read the same.
+          echo "=== share of pixels at or near white (the skybox test) ==="
+          for f in $(ls -1 out/*.mp4 | sort); do
+            printf '%-28s ' "$(basename "$f")"
+            ffmpeg -nostdin -i "$f" -vf "format=gray,signalstats,metadata=print:key=lavfi.signalstats.YHIGH" \
+              -f null - 2>&1 | grep -o "YHIGH=[0-9.]*" | cut -d= -f2 \
+              | awk '{s+=$1; n++} END {if(n) printf "%.4f\n", s/n; else print "n/a"}'
           done
           ls -la out/
 
@@ -141,5 +185,5 @@ jobs:
         with:
           name: brightness-test-output
           path: out/
-          retention-days: 3
+          retention-days: 7
           if-no-files-found: warn
