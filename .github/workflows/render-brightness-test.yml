@@ -24,6 +24,14 @@ name: Brightness Test
 # Renders the same window five ways and reports mean brightness over the whole
 # clip. Not a single frame: the last attempt at this landed on a saber clash and
 # compared a light plume against an empty corridor.
+#
+# Read the engine passes with care even so. Each is a separate run, and separate
+# runs start capture at different demo moments -- the first sweep produced 531
+# frames for one pass and 537 for another, of visibly different action, which
+# makes their means incomparable however many frames go into them. Only the
+# ffmpeg pass is a true comparison, because it is the baseline's own frames
+# regraded. Pinning every pass with seekdemo would fix this and is the obvious
+# next move if the engine-side options ever need a real answer.
 on:
   workflow_dispatch:
 
@@ -171,7 +179,11 @@ jobs:
 
           # Highlight clipping is the thing that killed intensity 2, and a mean
           # cannot show it: a washed sky and a brighter room read the same.
-          echo "=== share of pixels at or near white (the skybox test) ==="
+          # YHIGH is signalstats' high percentile, not a count of white pixels
+          # -- what matters is how far it moves relative to the mean. A lift
+          # that raises the mean more than this is lifting shadows; one that
+          # raises this more is heading for a blown sky.
+          echo "=== high-percentile luma, against the mean above ==="
           for f in $(ls -1 out/*.mp4 | sort); do
             printf '%-28s ' "$(basename "$f")"
             ffmpeg -nostdin -i "$f" -vf "format=gray,signalstats,metadata=print:key=lavfi.signalstats.YHIGH" \
