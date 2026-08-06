@@ -94,7 +94,7 @@ jobs:
               for line in "$@"; do echo "$line"; done
               echo "wait 200"
               echo "video $NAME"
-              echo "wait 300"
+              echo "wait 900"
               echo "stopvideo"
               echo "quit"
             } > "$ROOT/base/$NAME.cfg"
@@ -110,15 +110,29 @@ jobs:
           # Everything the game would normally draw.
           pass hud-on "set cg_draw2D 1"
 
-          # HUD kept, incidental clutter removed. Chat and the lag meter are
-          # noise on a published video; the scoreboard would cover the action.
-          pass hud-tidy \
+          # What renders should ship: HUD on, kill feed visible, chat gone.
+          #
+          # con_notifytime governs the notify area, which carries kills, flag
+          # events AND chat -- it cannot separate them. cg_drawChat is the new
+          # cvar in the fork's cgame that keeps chat out at the print site, so
+          # the two can finally be set independently.
+          pass hud-feed \
             "set cg_draw2D 1" \
+            "set con_notifytime 8" \
+            "set cg_drawChat 0" \
             "set cg_drawFPS 0" \
             "set cg_lagometer 0" \
-            "set cg_drawTeamOverlay 0" \
-            "set cg_chatBeep 0" \
-            "set con_notifytime 0"
+            "set cg_drawTeamOverlay 0"
+
+          # Control: same but with chat allowed through, to show the cvar is
+          # doing something rather than the demo simply having no chat in it.
+          pass hud-feed-with-chat \
+            "set cg_draw2D 1" \
+            "set con_notifytime 8" \
+            "set cg_drawChat 1" \
+            "set cg_drawFPS 0" \
+            "set cg_lagometer 0" \
+            "set cg_drawTeamOverlay 0"
 
           find "$ROOT" -name "*.avi" -exec ls -la {} \;
 
@@ -130,7 +144,7 @@ jobs:
             N=$(basename "$AVI" .avi)
             ffmpeg -nostdin -y -i "$AVI" -c:v libx264 -crf 23 -preset veryfast \
               -pix_fmt yuv420p -an "out/$N.mp4" >/dev/null 2>&1 || true
-            for T in 2 6; do
+            for T in 2 6 10 14; do
               ffmpeg -nostdin -y -ss "$T" -i "out/$N.mp4" -frames:v 1 "out/$N-t$T.jpg" >/dev/null 2>&1 || true
             done
           done
