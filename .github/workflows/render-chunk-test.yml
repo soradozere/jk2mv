@@ -158,16 +158,35 @@ jobs:
             ffmpeg -nostdin -i "$f" -af volumedetect -f null /dev/null 2>&1 | grep mean_volume || echo "NO AUDIO"
           done
 
-          # The picture either side of a boundary. Chunk 0 ends at 5s, so if
-          # stopvideo/video loses a frame the two files diverge from there on
-          # and SSIM drops away from 1.
-          echo "=== SSIM at each chunk boundary (1.0 = identical) ==="
-          for T in 4.9 5.0 5.1 9.9 10.0 10.1 15.0; do
-            ffmpeg -nostdin -y -ss "$T" -i out/whole.mp4 -frames:v 1 /tmp/a.png 2>/dev/null || continue
-            ffmpeg -nostdin -y -ss "$T" -i out/chunked.mp4 -frames:v 1 /tmp/b.png 2>/dev/null || continue
-            S=$(ffmpeg -nostdin -i /tmp/a.png -i /tmp/b.png -lavfi ssim -f null - 2>&1 \
-                | grep -o "All:[0-9.]*" | head -1 | cut -d: -f2)
-            echo "  t=${T}s  ssim=${S:-n/a}"
+          # Each chunk must be exactly CHUNK_FRAMES. A short or long chunk means
+          # stopvideo/video is not splitting where it was told to.
+          echo "=== frames per chunk (expect $CHUNK_FRAMES each) ==="
+          for f in $(ls -1 out/chunk*.mp4 | sort); do
+            echo "  $(basename "$f"): $(count "$f") frames"
+          done
+
+          # Boundary integrity, measured WITHIN the chunked video.
+          #
+          # Comparing against the whole render is useless: they are separate
+          # engine runs that start capture at slightly different demo moments,
+          # so they differ everywhere for reasons that have nothing to do with
+          # chunking. Instead, look at how much the picture changes from one
+          # frame to the next. If a boundary dropped or repeated a frame, the
+          # step across it would stand out against normal motion either side.
+          echo "=== frame-to-frame change around each boundary ==="
+          echo "    (a boundary that behaves like its neighbours is clean)"
+          for B in 150 300 450; do
+            echo "  -- boundary at frame $B --"
+            for N in $(( B - 2 )) $(( B - 1 )) "$B" $(( B + 1 )) $(( B + 2 )); do
+              ffmpeg -nostdin -y -i out/chunked.mp4 -vf "select=eq(n\,$(( N - 1 )))" -frames:v 1 /tmp/p.png 2>/dev/null
+              ffmpeg -nostdin -y -i out/chunked.mp4 -vf "select=eq(n\,$N)" -frames:v 1 /tmp/q.png 2>/dev/null
+              S=$(ffmpeg -nostdin -i /tmp/p.png -i /tmp/q.png -lavfi ssim -f null - 2>&1 \
+                  | grep -o "All:[0-9.]*" | head -1 | cut -d: -f2)
+              FLAG=""
+              # 1.0 means the frame did not change at all, i.e. a duplicate.
+              awk -v s="${S:-0}" 'BEGIN{exit !(s>0.999)}' && FLAG="  <-- DUPLICATE FRAME"
+              echo "     frame $(( N - 1 ))->$N  ssim=${S:-n/a}$FLAG"
+            done
           done
 
       - uses: actions/upload-artifact@v4
