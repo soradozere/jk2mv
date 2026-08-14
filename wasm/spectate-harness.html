@@ -97,9 +97,22 @@ const BUILD_DIR = new URLSearchParams(location.search).get("build") === "dev"
   ? "../build-wasm-livespectate"
   : "../build-wasm-livespectate-rel";
 
+// The bridge URL comes from the engine's allowlist at connect time (see the
+// connect handler), not from here. Emscripten reads Module.websocket.url when
+// it creates each socket, and websocketArgs holds this very object by
+// reference -- so assigning to it before connecting is picked up.
+//
+// Note this page is served over plain http and still opens wss: allowed and
+// deliberate. Only the reverse (an https page opening ws://) is blocked as
+// mixed content, which is exactly why the TLS front exists for the real
+// /live page.
+
 function bootEngine() {
   log(`using build: ${BUILD_DIR}`);
   window.Module = {
+    // Populated per-connect from the engine's allowlist. Must exist at boot:
+    // Emscripten captures this object by reference during runtime init.
+    websocket: {},
     canvas: document.getElementById("canvas"),
     locateFile: (path) => `${BUILD_DIR}/${path}`,
     setStatus: (text) => { statusEl.textContent = text || "running"; },
@@ -122,6 +135,7 @@ function bootEngine() {
       state: Module.cwrap("JKD_GetConnectionState", "number", []),
       serverCount: Module.cwrap("JKD_GetServerCount", "number", []),
       serverName: Module.cwrap("JKD_GetServerName", "string", ["number"]),
+      serverUrl: Module.cwrap("JKD_GetServerUrl", "string", ["number"]),
       forceVersion: Module.cwrap("JKD_ForceGameversion", null, ["number"]),
     };
     // Populate the picker from the engine's own allowlist -- the addresses
@@ -154,8 +168,13 @@ connectBtn.addEventListener("click", () => {
   if (!jkd) return;
   const idx = parseInt(serverSel.value, 10);
   const ver = parseInt(document.getElementById("ver").value, 10);
-  log(`connecting to server #${idx} (${jkd.serverName(idx)}), version=${ver}`);
+  const url = jkd.serverUrl(idx);
+  log(`connecting to server #${idx} (${jkd.serverName(idx)}) via ${url}, version=${ver}`);
   try {
+    // Must be a complete URL: given a bare "wss://" prefix Emscripten would
+    // append the address the engine dialled instead. Set before connecting --
+    // it is read when the socket is created.
+    Module.websocket.url = url;
     // Before connecting: CL_ServerInfoPacket only adopts the server's
     // version while the current one is still UNDEF.
     if (ver) jkd.forceVersion(ver);

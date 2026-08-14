@@ -955,11 +955,26 @@ int jkd_liveSpectate = 0;
 // into a ws:// URL; they become wss:// bridge endpoints once Caddy fronts them.
 typedef struct {
 	const char *name;		// label for the page's server picker
-	const char *endpoint;	// host:port -> ws://host:port
+	const char *endpoint;	// what the ENGINE dials: numeric ip:port
+	const char *url;		// what the BROWSER dials: full wss:// bridge URL
 } jkd_server_t;
 
+// Two addresses per server, and they are deliberately different things.
+//
+// `endpoint` is what the engine's netcode dials, and it stays a NUMERIC
+// ip:port. Emscripten has no real resolver -- it invents 172.29.x.x addresses
+// for hostnames -- and its socket layer would then build a WebSocket URL out
+// of that invented address, which resolves to nothing. Giving the engine
+// numbers keeps DNS out of the picture entirely.
+//
+// `url` is what the browser actually opens: the full wss:// URL of the bridge,
+// handed to Emscripten via Module.websocket.url before connecting. It must be
+// a COMPLETE url -- given a bare "wss://" prefix, Emscripten appends the
+// dialled address instead, which puts us back on the invented one. The
+// hostname here is what the TLS certificate is issued for, so it has to be the
+// name rather than the IP.
 static const jkd_server_t jkd_servers[] = {
-	{ "Soracle Test", "34.150.239.4:8080" },
+	{ "Soracle Test", "34.150.239.4:443", "wss://34-150-239-4.sslip.io/" },
 };
 #define JKD_NUM_SERVERS ( (int)( sizeof( jkd_servers ) / sizeof( jkd_servers[0] ) ) )
 
@@ -972,6 +987,16 @@ EMSCRIPTEN_KEEPALIVE const char *JKD_GetServerName( int index ) {
 		return "";
 	}
 	return jkd_servers[ index ].name;
+}
+
+// The bridge URL for this server, for the page to hand to
+// Module.websocket.url before connecting. The address still originates here
+// rather than in JS -- the page only relays what the engine gave it.
+EMSCRIPTEN_KEEPALIVE const char *JKD_GetServerUrl( int index ) {
+	if ( index < 0 || index >= JKD_NUM_SERVERS ) {
+		return "";
+	}
+	return jkd_servers[ index ].url;
 }
 
 // Connect to an allowlisted server by index. Returns 1 if the connect was
