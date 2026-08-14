@@ -180,11 +180,27 @@ static qboolean Sys_StringToSockaddr( const char *s, struct sockaddr_in *sadr )
 	sadr->sin_family = AF_INET;
 	sadr->sin_port = 0;
 
-	if( s[0] >= '0' && s[0] <= '9' )
-	{
-		sadr->sin_addr.s_addr = inet_addr(s);
-	}
-	else
+	/*
+	Try to parse as a dotted-quad first, and fall back to DNS.
+
+	This used to choose between the two by looking at the FIRST CHARACTER
+	only -- a leading digit meant "numeric address", anything else meant
+	"hostname". That is wrong for any hostname beginning with a digit, which
+	was unusual in 1999 and is ordinary now: "34-150-239-4.sslip.io" went
+	straight to inet_addr, failed, and surfaced as "Bad server address" with
+	no hint that DNS was never attempted. Hosts like 1e100.net or any
+	IP-derived name hit the same wall.
+
+	inet_addr returns INADDR_NONE (-1) when the string is not a valid
+	address, which is the actual test for "was that a numeric address?" --
+	so ask it rather than guessing from one character. The 255.255.255.255
+	edge case (a valid broadcast address that also encodes as INADDR_NONE)
+	is not one a game server is ever reached at, and it would only cost a
+	pointless DNS lookup that fails anyway.
+	*/
+	sadr->sin_addr.s_addr = inet_addr( s );
+
+	if ( sadr->sin_addr.s_addr == INADDR_NONE )
 	{
 		if( ( h = gethostbyname( s ) ) == 0 )
 			return qfalse;
