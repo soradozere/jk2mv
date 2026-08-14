@@ -79,7 +79,11 @@ def verify_token(token, secret, now_ms=None):
         return None
     now = now_ms if now_ms is not None else time.time() * 1000
     if now > expires:
-        return None
+        # Distinguished from a bad signature by the caller: "expired" means
+        # the client waited too long and should ask the site for another,
+        # while "bad signature" means someone is forging. Reporting both as
+        # one thing sent us chasing a forgery that was really a stale tab.
+        return {"expired_by_ms": now - expires}
     if server_index < 0:
         return None
     return {"player_id": player_id, "server_index": server_index}
@@ -158,8 +162,13 @@ async def handle_client(ws, target_host, target_port, stats, source_index,
         # A client may offer several; ours sends one.
         token = token.split(",")[0].strip()
         claims = verify_token(token, secret)
+        if claims and "expired_by_ms" in claims:
+            log.warning("REJECTED %s: token expired %.0fs ago -- fetch a fresh one",
+                        peer, claims["expired_by_ms"] / 1000)
+            await ws.close(code=4401, reason="token expired")
+            return
         if not claims:
-            log.warning("REJECTED %s: bad or expired token", peer)
+            log.warning("REJECTED %s: bad signature (token=%r)", peer, token[:24])
             await ws.close(code=4401, reason="unauthorized")
             return
         if claims["server_index"] != server_index:
