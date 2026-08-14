@@ -1570,6 +1570,14 @@ void CL_FirstSnapshot( void ) {
 
 	cls.state = CA_ACTIVE;
 
+#ifdef JKD_LIVE_CONNECT
+	// The gameversion here is the one MSG_ReadDeltaEntity is using to choose
+	// between the 1.02 and 1.04 entity field tables -- the decision that
+	// decides whether the entity stream parses at all.
+	Com_Printf( "[JKD_LIVE_CONNECT] first snapshot received, now active (gameversion=%d)\n",
+		(int)MV_GetCurrentGameversion() );
+#endif
+
 	WIN_SetTaskbarState(TBS_NOTIFY, 0, 0);
 
 	// set the timedelta so we are exactly on this first frame

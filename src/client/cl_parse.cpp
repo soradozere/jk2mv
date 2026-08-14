@@ -7,6 +7,71 @@
 #include "../qcommon/INetProfile.h"
 #endif
 
+#ifdef JKD_LIVE_CONNECT
+// Everything after the parse failure is aftermath: ERR_DROP disconnects the
+// client, the server keeps streaming for a while, and every one of those
+// packets is discarded with a log line. That buried the actual evidence under
+// thousands of lines twice. Muted at the moment of failure so the tail of the
+// console is the failure itself.
+int jkd_logMuted = 0;
+
+// Ring buffers instead of capped printing. Two caps in a row expired right
+// before the failure and silently swallowed the evidence -- a cap answers
+// "how much may I log" when the question is "what happened LAST". These
+// record everything and print nothing; the PARSE FAIL handler dumps them, so
+// the failure report carries its own recent history.
+#define JKD_OPRING_SIZE 32
+typedef struct {
+	int msgSeq;			// clc.serverMessageSequence when the op was read
+	int op;
+	int readcount;
+	int cursize;
+	int reliableAck;	// changes when the server acks OUR reliable command --
+						// suspect trigger, since the client's first one
+						// ("cmd team spectator") fires ~1s in, right when
+						// this always dies
+} jkd_opEvent_t;
+static jkd_opEvent_t jkd_opRing[JKD_OPRING_SIZE];
+static int jkd_opRingHead = 0;
+
+#define JKD_CMDRING_SIZE 8
+static char jkd_cmdRing[JKD_CMDRING_SIZE][96];
+static int jkd_cmdRingSeq[JKD_CMDRING_SIZE];
+static int jkd_cmdRingHead = 0;
+
+void JKD_DumpRings( void ) {
+	int i;
+	Com_Printf( "[JKD_LIVE_CONNECT] ---- last %d ops (oldest first) ----\n", JKD_OPRING_SIZE );
+	for ( i = 0; i < JKD_OPRING_SIZE; i++ ) {
+		const jkd_opEvent_t *e = &jkd_opRing[ (jkd_opRingHead + i) % JKD_OPRING_SIZE ];
+		if ( !e->cursize ) continue;	// unused slot
+		Com_Printf( "[JKD_LIVE_CONNECT]  msg=%d op=%d rc=%d/%d relAck=%d\n",
+			e->msgSeq, e->op, e->readcount, e->cursize, e->reliableAck );
+	}
+	Com_Printf( "[JKD_LIVE_CONNECT] ---- last %d server commands ----\n", JKD_CMDRING_SIZE );
+	for ( i = 0; i < JKD_CMDRING_SIZE; i++ ) {
+		int idx = (jkd_cmdRingHead + i) % JKD_CMDRING_SIZE;
+		if ( !jkd_cmdRing[idx][0] ) continue;
+		Com_Printf( "[JKD_LIVE_CONNECT]  cmdseq=%d: %s\n", jkd_cmdRingSeq[idx], jkd_cmdRing[idx] );
+	}
+
+	// The decode key material itself. CL_Netchan_Decode XORs every server
+	// message with clc.reliableCommands[reliableAcknowledge & 63] -- the text
+	// of our own command at the acked index. The crash happens on the first
+	// message whose ack references a new slot, so either that slot's text
+	// differs from what the server received (prefix-sharing sibling: the
+	// first decoded byte still came out right), or the slot is empty and the
+	// server is acking commands we never sent.
+	Com_Printf( "[JKD_LIVE_CONNECT] ---- reliable command state ----\n" );
+	Com_Printf( "[JKD_LIVE_CONNECT]  reliableSequence=%d reliableAcknowledge=%d serverCommandSequence=%d\n",
+		clc.reliableSequence, clc.reliableAcknowledge, clc.serverCommandSequence );
+	for ( i = 0; i <= clc.reliableSequence && i < 10; i++ ) {
+		Com_Printf( "[JKD_LIVE_CONNECT]  reliableCommands[%d]: \"%.80s\"\n",
+			i, clc.reliableCommands[i] );
+	}
+}
+#endif
+
 static const char * const svc_strings[256] = {
 	"svc_bad",
 
@@ -104,6 +169,20 @@ void CL_ParsePacketEntities( msg_t *msg, clSnapshot_t *oldframe, clSnapshot_t *n
 		}
 
 		if ( msg->readcount > msg->cursize ) {
+#ifdef JKD_LIVE_CONNECT
+			// Which failure is this? A message that arrived SHORT (truncated
+			// somewhere in transport) and a message that arrived whole but was
+			// decoded with the wrong field layout both end here, and they need
+			// opposite fixes. readcount barely past cursize on a small message
+			// says truncation; a full-size message with entities already parsed
+			// says the decode walked off the end.
+			Com_Printf( "[JKD_LIVE_CONNECT] PARSE FAIL: readcount=%d cursize=%d "
+				"maxsize=%d entitiesParsed=%d lastNewnum=%d gameversion=%d\n",
+				msg->readcount, msg->cursize, msg->maxsize,
+				newframe->numEntities, newnum, (int)MV_GetCurrentGameversion() );
+			JKD_DumpRings();
+			jkd_logMuted = 1;
+#endif
 			Com_Error (ERR_DROP,"CL_ParsePacketEntities: end of message");
 		}
 
@@ -720,6 +799,18 @@ void CL_ParseCommandString( msg_t *msg ) {
 	endBytes=msg->readcount;
 	ClReadProf().AddField("svc_serverCommand",endBytes-startBytes);
 #endif
+
+#ifdef JKD_LIVE_CONNECT
+	// Into the ring, dumped on failure. Two suspects would show up here: an
+	// NWH team-overlay update (g_teamoverlayupdate is 1000ms, and death is
+	// ~1s after active), or the server's response to our own first reliable
+	// command ("cmd team spectator", also ~1s in).
+	if ( !jkd_logMuted ) {
+		Q_strncpyz( jkd_cmdRing[jkd_cmdRingHead], s, sizeof(jkd_cmdRing[0]) );
+		jkd_cmdRingSeq[jkd_cmdRingHead] = seq;
+		jkd_cmdRingHead = (jkd_cmdRingHead + 1) % JKD_CMDRING_SIZE;
+	}
+#endif
 	// see if we have already executed stored it off
 	if ( clc.serverCommandSequence >= seq ) {
 		return;
@@ -764,6 +855,21 @@ void CL_ParseServerMessage( msg_t *msg ) {
 		}
 
 		cmd = MSG_ReadByte( msg );
+
+#ifdef JKD_LIVE_CONNECT
+		// Recorded silently into the ring; JKD_DumpRings prints the recent
+		// history when the parse fails. (A printed version of this existed
+		// and its cap expired right before the failure, twice.)
+		if ( !jkd_logMuted ) {
+			jkd_opEvent_t *e = &jkd_opRing[jkd_opRingHead];
+			e->msgSeq = clc.serverMessageSequence;
+			e->op = cmd;
+			e->readcount = msg->readcount;
+			e->cursize = msg->cursize;
+			e->reliableAck = clc.reliableAcknowledge;
+			jkd_opRingHead = (jkd_opRingHead + 1) % JKD_OPRING_SIZE;
+		}
+#endif
 
 		if ( cmd == svc_EOF) {
 			SHOWNET( msg, "END OF MESSAGE" );

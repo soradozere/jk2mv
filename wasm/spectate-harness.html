@@ -1,0 +1,143 @@
+<!doctype html>
+<!--
+  Throwaway test harness for the live-spectate bridge prototype (Brief 1 of
+  2). Not part of the viewer build, not linked from anywhere Soracle serves.
+
+  Requires a wasm build made with -DJKD_LIVE_CONNECT=ON (see
+  wasm/CMakeLists.txt). Against a normal build, JKD_ConnectSpectate simply
+  doesn't exist and the Connect button will say so.
+
+  Serve this from the jk2mv project root so the relative path below reaches
+  the build output, e.g.:
+
+      python3 serve.py 8090 .
+
+  then open http://localhost:8090/wasm/spectate-harness.html
+
+  How "Bridge address" works: the engine's `connect` command dials whatever
+  address string it's given, and Emscripten's socket emulation turns a plain
+  TCP/UDP connect() into a WebSocket to that same host:port by default -- no
+  extra JS-side config needed for a single same-box bridge. So the bridge's
+  own websockify address IS the connect target; there's deliberately only
+  one field. If snapshots never arrive and the console shows the handshake
+  retrying forever, the first thing to check is whether that default-dial
+  assumption held -- the fallback is setting Module.websocket.url explicitly
+  before load, which this file does not do on purpose (see the comment
+  above bootEngine()).
+-->
+<html lang="en-us">
+<head>
+<meta charset="utf-8">
+<title>live-spectate harness</title>
+<style>
+  body { background: #111; color: #ddd; font-family: monospace; margin: 0; padding: 12px; }
+  #controls { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+  input { font-family: monospace; font-size: 13px; padding: 4px 6px; width: 320px; }
+  button { font-family: monospace; font-size: 13px; padding: 4px 12px; }
+  button:disabled { opacity: 0.5; }
+  canvas { display: block; background: #000; width: 800px; height: 450px; }
+  #log { white-space: pre-wrap; font-size: 12px; line-height: 1.4; max-height: 40vh; overflow-y: auto;
+         background: #000; border: 1px solid #333; padding: 8px; margin-top: 10px; }
+  .err { color: #f66; }
+  .ok { color: #6f6; }
+</style>
+</head>
+<body>
+
+<div id="controls">
+  <label>Bridge address (host:port, no ws://)
+    <input id="addr" placeholder="34.123.45.67:8080" autocomplete="off">
+  </label>
+  <label>Version
+    <select id="ver">
+      <option value="0">auto-detect</option>
+      <option value="2" selected>force 1.02</option>
+      <option value="4">force 1.04</option>
+    </select>
+  </label>
+  <button id="connectBtn" disabled>Connect</button>
+  <span id="status">booting engine…</span>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<div id="log"></div>
+
+<script>
+const logEl = document.getElementById("log");
+const statusEl = document.getElementById("status");
+const connectBtn = document.getElementById("connectBtn");
+const addrInput = document.getElementById("addr");
+
+function log(text, cls) {
+  console.log("[harness]", text);
+  const line = document.createElement("div");
+  if (cls) line.className = cls;
+  line.textContent = text;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// Deliberately no Module.websocket override -- see the file header. This is
+// the simplest thing that could work, and whether it does is exactly what
+// this prototype exists to find out.
+// Release by default: the dev build's assertions turn a renderer complaint
+// into a dead page (NDEBUG makes several of them a survivable early-out
+// instead -- same reason tools/build-release.sh exists). Append
+// ?build=dev for the assertion-heavy build when diagnosing.
+const BUILD_DIR = new URLSearchParams(location.search).get("build") === "dev"
+  ? "../build-wasm-livespectate"
+  : "../build-wasm-livespectate-rel";
+
+function bootEngine() {
+  log(`using build: ${BUILD_DIR}`);
+  window.Module = {
+    canvas: document.getElementById("canvas"),
+    locateFile: (path) => `${BUILD_DIR}/${path}`,
+    setStatus: (text) => { statusEl.textContent = text || "running"; },
+    print: (text) => log(text),
+    printErr: (text) => log(text, "err"),
+    onAbort: (what) => log(`ENGINE ABORTED: ${what}`, "err"),
+  };
+
+  window.JKD_ready = () => {
+    log("JKD_ready -- engine booted", "ok");
+    statusEl.textContent = "ready";
+    if (typeof Module._JKD_ConnectSpectate === "undefined" &&
+        typeof Module.asm?._JKD_ConnectSpectate === "undefined") {
+      log("JKD_ConnectSpectate not found in this build -- rebuild with -DJKD_LIVE_CONNECT=ON", "err");
+      return;
+    }
+    connectBtn.disabled = false;
+  };
+
+  const script = document.createElement("script");
+  script.src = `${BUILD_DIR}/jk2mv_wasm.js`;
+  script.onerror = () => log(`could not load ${script.src} -- did the build finish, and is this served from the jk2mv project root?`, "err");
+  document.body.appendChild(script);
+}
+
+connectBtn.addEventListener("click", () => {
+  const addr = addrInput.value.trim();
+  if (!addr) {
+    log("enter a bridge address first", "err");
+    return;
+  }
+  const ver = parseInt(document.getElementById("ver").value, 10);
+  log(`calling JKD_ConnectSpectate("${addr}"), version=${ver}`);
+  try {
+    // Before connecting: CL_ServerInfoPacket only adopts the server's
+    // version while the current one is still UNDEF.
+    if (ver) Module.ccall("JKD_ForceGameversion", null, ["number"], [ver]);
+    Module.ccall("JKD_ConnectSpectate", null, ["string"], [addr]);
+  } catch (e) {
+    log(`ccall failed: ${e}`, "err");
+  }
+});
+
+log("loading jk2mv_wasm.js …");
+bootEngine();
+</script>
+
+</body>
+</html>

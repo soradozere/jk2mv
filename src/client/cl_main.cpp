@@ -896,6 +896,61 @@ EMSCRIPTEN_KEEPALIVE const char *JKD_GetPlayerInfo( int clientNum ) {
 		: NULL;
 	return cs ? cs : "";
 }
+
+#ifdef JKD_LIVE_CONNECT
+// Live-spectate bridge prototype only -- see the JKD_LIVE_CONNECT build
+// option. Not part of the normal (demo-only) viewer build.
+//
+// CL_Connect_f and the "team" command already do the real work; this just
+// gives the harness page one call instead of orchestrating both itself, and
+// tags its own console output so it's findable amid the engine's ordinary
+// handshake chatter, most of which (CL_CheckForResend's retry loop, the
+// CA_ACTIVE transition in CL_FirstSnapshot) prints nothing on its own.
+// Force the client's JK2 gameversion before connecting, or 0 to auto-detect.
+//
+// Why this exists: the first live test reached CA_ACTIVE and then died on
+// `CL_ParsePacketEntities: end of message` about a second later -- the point
+// where the first *entity* delta is decoded. 1.02 and 1.04 have different
+// entityState field tables, so decoding a 1.02 stream as 1.04 walks off the
+// end of the message, which is exactly that error. The test server reports
+// protocol 15 (= 1.02) while the client's cgame loaded as 1.04.
+//
+// CL_ServerInfoPacket only adopts the server's version when the current one
+// is VERSION_UNDEF, so setting this makes the client commit to a version and
+// ignore detection -- which is the point when detection is the suspect.
+// Sticky, and it has to be: setting the version once before connecting does
+// NOTHING. CL_Connect_f calls CL_Disconnect, which resets the gameversion to
+// VERSION_UNDEF -- so the first version of this was a silent no-op and the
+// "forcing 1.02 changes nothing" result it produced was worthless. Kept here
+// and reapplied on every handshake attempt (see CL_CheckForResend) so it is
+// still in force when the first entity delta is decoded, which is the only
+// moment that matters: MSG_ReadDeltaEntity picks entityStateFields15 vs
+// entityStateFields16 off this value.
+int jkd_forcedGameversion = 0;
+
+EMSCRIPTEN_KEEPALIVE void JKD_ForceGameversion( int version ) {
+	jkd_forcedGameversion = version;
+	MV_SetCurrentGameversion( (mvversion_t)version );
+	Com_Printf( "[JKD_LIVE_CONNECT] gameversion forced to %d (0 = auto-detect)\n", version );
+}
+
+EMSCRIPTEN_KEEPALIVE void JKD_ConnectSpectate( const char *serverAddr ) {
+	Com_Printf( "[JKD_LIVE_CONNECT] connecting to %s (gameversion currently %d)\n",
+		serverAddr, (int)MV_GetCurrentGameversion() );
+	Cbuf_AddText( va( "connect %s\n", serverAddr ) );
+	// "wait" counts frames, not wall time -- the same mechanism render.cfg
+	// uses to sequence camera cvars after a connect/demo load. Long enough
+	// to clear the challenge/connect handshake before forcing team; the
+	// command buffer just holds this until then, whether that's one round
+	// trip or several retries.
+	Cbuf_AddText( "wait 300\n" );
+	// "cmd", not a bare "team": team is a *server* command (g_cmds.c's
+	// ClientCommand), so the client console has no such command and said so --
+	// `Unknown command "team"`. cmd forwards the rest as a reliable command,
+	// which is how every in-game team change actually reaches the server.
+	Cbuf_AddText( "cmd team spectator\n" );
+}
+#endif
 }
 #endif
 
@@ -2844,6 +2899,22 @@ void CL_CheckForResend( void ) {
 	clc.connectTime = cls.realtime;	// for retransmit requests
 	clc.connectPacketCount++;
 
+#ifdef JKD_LIVE_CONNECT
+	{
+		// Reapplied here, not just once at the JS call: CL_Connect_f's
+		// CL_Disconnect resets the version to UNDEF, and the infoResponse
+		// then sets it from the server's protocol. This runs after both.
+		extern int jkd_forcedGameversion;
+		if ( jkd_forcedGameversion ) {
+			MV_SetCurrentGameversion( (mvversion_t)jkd_forcedGameversion );
+		}
+	}
+	// This loop otherwise prints nothing per attempt -- silently retrying
+	// and permanently stuck look identical from the console without this.
+	Com_Printf( "[JKD_LIVE_CONNECT] handshake attempt %d (state=%s, gameversion=%d)\n",
+		clc.connectPacketCount, cls.state == CA_CONNECTING ? "connecting" : "challenging",
+		(int)MV_GetCurrentGameversion() );
+#endif
 
 	switch ( cls.state ) {
 	case CA_CONNECTING:
@@ -3370,6 +3441,17 @@ void CL_PacketEvent( netadr_t from, msg_t *msg ) {
 	}
 
 	if ( cls.state < CA_CONNECTED ) {
+#ifdef JKD_LIVE_CONNECT
+		{
+			extern int jkd_logMuted;
+			static int jkd_earlyDrops = 0;
+			if ( !jkd_logMuted && jkd_earlyDrops < 20 ) {
+				Com_Printf( "[JKD_LIVE_CONNECT] dropped sequenced packet (%d bytes): state=%d < CA_CONNECTED\n",
+					msg->cursize, (int)cls.state );
+				jkd_earlyDrops++;
+			}
+		}
+#endif
 		return;		// can't be a valid sequenced packet
 	}
 
@@ -3382,6 +3464,22 @@ void CL_PacketEvent( netadr_t from, msg_t *msg ) {
 	// packet from server
 	//
 	if ( !NET_CompareAdr( from, clc.netchan.remoteAddress ) ) {
+#ifdef JKD_LIVE_CONNECT
+		// Com_DPrintf, i.e. invisible without developer 1 -- which is why
+		// packets appeared to vanish between the socket and the netchan with
+		// no explanation at all. Emscripten's socket layer synthesises peer
+		// addresses for WebSockets and rewrites a peer's port when it sees a
+		// "port" message, so the server's apparent identity can change
+		// mid-connection and every later packet is silently discarded here.
+		{
+			static int jkd_adrDrops = 0;
+			if ( jkd_adrDrops < 20 ) {
+				Com_Printf( "[JKD_LIVE_CONNECT] DROPPED: packet from %s does not match server %s (%d bytes)\n",
+					NET_AdrToString( from ), NET_AdrToString( clc.netchan.remoteAddress ), msg->cursize );
+				jkd_adrDrops++;
+			}
+		}
+#endif
 		Com_DPrintf ("%s:sequenced packet without connection\n"
 			,NET_AdrToString( from ) );
 		// FIXME: send a client disconnect?

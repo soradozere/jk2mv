@@ -11,6 +11,11 @@ project(jk2mv_wasm C CXX)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_C_STANDARD 11)
 
+# Off by default: this is a throwaway prototype path (live-spectate bridge
+# brief), not part of the normal viewer build. It exists so the JS harness
+# can drive JKD_ConnectSpectate; nothing else changes when this is OFF.
+option(JKD_LIVE_CONNECT "Enable the spectate-bridge connect path (dev prototype only)" OFF)
+
 # ============================================================================
 # Paths
 # ============================================================================
@@ -52,6 +57,10 @@ add_compile_definitions(
     _JK2
     DEFAULT_ES=2          # GL4ES: use GLES2 backend
 )
+
+if(JKD_LIVE_CONNECT)
+    add_compile_definitions(JKD_LIVE_CONNECT)
+endif()
 
 # Emscripten ports (SDL2, GLES) need these -s flags at COMPILE time too, not
 # just link time, so the compiler picks the port-provided headers instead of
@@ -502,6 +511,14 @@ else()
         "-sSTACK_OVERFLOW_CHECK=1" # this was firing for real: GL4ES writing through a NULL glstate was
                                    # clobbering low memory including the stack cookie. Keep it in dev builds.
     )
+endif()
+
+if(JKD_LIVE_CONNECT)
+    # Diagnosing the WebSocket<->UDP bridge prototype: this surfaces every
+    # socket open/close/send event libsockfs.js sees, which plain engine
+    # logging can't -- the engine doesn't know why a peer connection died,
+    # only that it did.
+    list(APPEND EMS_LINK_FLAGS "-sSOCKET_DEBUG=1")
 endif()
 
 string(REPLACE ";" " " EMS_LINK_FLAGS_STR "${EMS_LINK_FLAGS}")
