@@ -22,6 +22,7 @@ Usage:
 """
 import argparse
 import asyncio
+import itertools
 import logging
 
 import websockets
@@ -71,7 +72,37 @@ async def reporter(stats, interval=10):
         )
 
 
-async def handle_client(ws, target_host, target_port, stats):
+def next_loopback_source(counter, target_host):
+    """A distinct 127.0.0.x source address per viewer, or None.
+
+    NWH ships g_limitSameIP 1 / g_maxConnPerIP 3, and the limiter counts
+    loopback -- measured: a second browser viewer through the bridge is
+    refused with "Too many connections from the same IP" when the cap is 1.
+    Since every viewer's packets leave the bridge from one socket address,
+    the bridge would otherwise impose a hard ceiling of 3 concurrent
+    viewers on a stock NWH server.
+
+    On Linux the whole 127.0.0.0/8 range is loopback, so when the game
+    server is on this same box each viewer can be given its own source
+    address and the limiter never trips -- no server config change, and no
+    asking an admin to weaken an anti-abuse control that exists for good
+    reason. They ARE separate clients; this just stops them looking like
+    one host.
+
+    Only valid when the target is loopback. Talking to a game server across
+    a network, the source has to be a real address on this machine, so the
+    per-IP limit applies for real and it becomes a conversation with
+    whoever runs that server.
+    """
+    if not target_host.startswith("127."):
+        return None
+    # .1 is left alone (anything else on the box uses it); start at .2.
+    # /8 gives ~16M addresses, so the wrap is theoretical.
+    octet_c, octet_d = divmod(counter % 65024, 254)
+    return f"127.0.{octet_c}.{octet_d + 2}"
+
+
+async def handle_client(ws, target_host, target_port, stats, source_index):
     peer = ws.remote_address
     log.info("client connected: %s", peer)
     loop = asyncio.get_running_loop()
@@ -95,10 +126,28 @@ async def handle_client(ws, target_host, target_port, stats):
         stats.to_client_packets += 1
         outbox.put_nowait(data)
 
-    transport, _ = await loop.create_datagram_endpoint(
-        lambda: UdpProtocol(forward_to_ws),
-        remote_addr=(target_host, target_port),
-    )
+    local_addr = None
+    src = next_loopback_source(source_index, target_host)
+    if src:
+        local_addr = (src, 0)
+    try:
+        transport, _ = await loop.create_datagram_endpoint(
+            lambda: UdpProtocol(forward_to_ws),
+            remote_addr=(target_host, target_port),
+            local_addr=local_addr,
+        )
+        if src:
+            log.info("  viewer %s using source %s", peer, src)
+    except OSError as e:
+        # Binding a loopback alias can fail on platforms where 127.0.0.0/8
+        # is not wholly local (macOS needs explicit aliases). Fall back to
+        # the default source rather than refusing the viewer -- they just
+        # count against the per-IP limit again.
+        log.warning("could not bind source %s (%s); using default", src, e)
+        transport, _ = await loop.create_datagram_endpoint(
+            lambda: UdpProtocol(forward_to_ws),
+            remote_addr=(target_host, target_port),
+        )
 
     async def pump():
         while True:
@@ -150,9 +199,12 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
     stats = Stats()
+    # Monotonic per-connection counter, so each viewer gets its own loopback
+    # source address (see next_loopback_source).
+    conn_counter = itertools.count()
 
     async def handler(ws):
-        await handle_client(ws, target_host, target_port, stats)
+        await handle_client(ws, target_host, target_port, stats, next(conn_counter))
 
     async def run():
         asyncio.create_task(reporter(stats))
