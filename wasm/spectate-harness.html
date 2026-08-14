@@ -55,6 +55,9 @@
       <option value="4">force 1.04</option>
     </select>
   </label>
+  <label>Token
+    <input id="token" placeholder="paste from /api/live/token" autocomplete="off" size="30">
+  </label>
   <button id="connectBtn" disabled>Connect</button>
   <button id="disconnectBtn" disabled>Disconnect</button>
   <span id="status">booting engine…</span>
@@ -72,6 +75,7 @@ const connectBtn = document.getElementById("connectBtn");
 const disconnectBtn = document.getElementById("disconnectBtn");
 const serverSel = document.getElementById("server");
 const connStateEl = document.getElementById("connState");
+const tokenInput = document.getElementById("token");
 
 // Bound after the engine boots.
 let jkd = null;
@@ -175,6 +179,20 @@ connectBtn.addEventListener("click", () => {
     // append the address the engine dialled instead. Set before connecting --
     // it is read when the socket is created.
     Module.websocket.url = url;
+
+    // The bridge refuses a socket without a valid token. Paste one from
+    // /api/live/token (see the token field above) -- the real /live page
+    // fetches it itself, but this harness is served from a different origin
+    // and has no Soracle session cookie to send.
+    const token = tokenInput.value.trim();
+    if (token) {
+      // Sec-WebSocket-Protocol is the only header a browser lets you set on
+      // a WebSocket, so it carries the credential. The bridge echoes it back.
+      Module.websocket.subprotocol = token;
+      log(`sending token (${token.slice(0, 12)}…)`);
+    } else {
+      log("no token — the bridge will refuse unless it runs with --no-auth", "err");
+    }
     // Before connecting: CL_ServerInfoPacket only adopts the server's
     // version while the current one is still UNDEF.
     if (ver) jkd.forceVersion(ver);

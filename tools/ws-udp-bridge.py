@@ -22,8 +22,12 @@ Usage:
 """
 import argparse
 import asyncio
+import hashlib
+import hmac
 import itertools
 import logging
+import os
+import time
 
 import websockets
 
@@ -43,6 +47,42 @@ class UdpProtocol(asyncio.DatagramProtocol):
 
     def error_received(self, exc):
         log.warning("udp error: %s", exc)
+
+
+def verify_token(token, secret, now_ms=None):
+    """Verify a Soracle live-spectate token; return claims or None.
+
+    Format, minted by lib/live-token.ts:
+        <playerId>.<serverIndex>.<expiryMs>.<hmac-sha256-hex>
+
+    The HMAC key is LIVE_BRIDGE_SECRET, deliberately NOT the site's session
+    secret: this process runs on a game server box that other people
+    administer, and a key found here must not be able to mint login cookies
+    for the site. Forging one of these only buys a spectate slot.
+    """
+    if not token:
+        return None
+    parts = token.split(".")
+    if len(parts) != 4:
+        return None
+    player_id, server_index_s, expires_s, sig = parts
+    payload = f"{player_id}.{server_index_s}.{expires_s}"
+    expected = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    # compare_digest, not ==: string comparison returns early on the first
+    # differing byte, which leaks how much of a guess was right.
+    if not hmac.compare_digest(sig, expected):
+        return None
+    try:
+        expires = int(expires_s)
+        server_index = int(server_index_s)
+    except ValueError:
+        return None
+    now = now_ms if now_ms is not None else time.time() * 1000
+    if now > expires:
+        return None
+    if server_index < 0:
+        return None
+    return {"player_id": player_id, "server_index": server_index}
 
 
 class Stats:
@@ -102,9 +142,49 @@ def next_loopback_source(counter, target_host):
     return f"127.0.{octet_c}.{octet_d + 2}"
 
 
-async def handle_client(ws, target_host, target_port, stats, source_index):
+async def handle_client(ws, target_host, target_port, stats, source_index,
+                        secret=None, server_index=0, sessions=None):
     peer = ws.remote_address
-    log.info("client connected: %s", peer)
+
+    # Authenticate BEFORE a single packet is relayed.
+    #
+    # This is the real boundary. The engine also has an allowlist, but that is
+    # client-side convenience -- anyone can edit the wasm or call the export --
+    # so without this check the bridge is an open UDP relay to the game server
+    # for whoever finds the port.
+    player_id = None
+    if secret:
+        token = ws.request.headers.get("Sec-WebSocket-Protocol", "")
+        # A client may offer several; ours sends one.
+        token = token.split(",")[0].strip()
+        claims = verify_token(token, secret)
+        if not claims:
+            log.warning("REJECTED %s: bad or expired token", peer)
+            await ws.close(code=4401, reason="unauthorized")
+            return
+        if claims["server_index"] != server_index:
+            # A token minted for another allowlisted server must not be
+            # replayable here.
+            log.warning("REJECTED %s: token is for server %d, this bridge is %d",
+                        peer, claims["server_index"], server_index)
+            await ws.close(code=4403, reason="wrong server")
+            return
+        player_id = claims["player_id"]
+        log.info("client connected: %s as player %s", peer, player_id)
+
+        # One session per account, strictly: a new request boots the old one.
+        # In memory, which is sufficient while there is exactly one bridge --
+        # if a second is ever run, two tabs could hold sessions on different
+        # bridges and this stops being an enforcement.
+        if sessions is not None:
+            previous = sessions.get(player_id)
+            if previous is not None and previous is not ws:
+                log.info("  booting previous session for %s", player_id)
+                asyncio.ensure_future(previous.close(code=4409, reason="superseded"))
+            sessions[player_id] = ws
+    else:
+        log.info("client connected: %s (no auth configured)", peer)
+
     loop = asyncio.get_running_loop()
 
     # Datagrams go through a queue drained by ONE task below, rather than
@@ -176,6 +256,12 @@ async def handle_client(ws, target_host, target_port, stats, source_index):
             await pump_task
         except (asyncio.CancelledError, Exception):
             pass
+        # Only clear the slot if it is still ours: a newer session for the
+        # same account may already have replaced it, and that one must not be
+        # evicted by the old socket's cleanup.
+        if sessions is not None and player_id is not None:
+            if sessions.get(player_id) is ws:
+                del sessions[player_id]
         log.info(
             "client disconnected: %s (down %d pkts/%d B, up %d pkts/%d B)",
             peer, stats.to_client_packets, stats.to_client_bytes,
@@ -190,7 +276,23 @@ def main():
                     help="host:port to accept WebSocket connections on")
     p.add_argument("--target", required=True,
                     help="host:port of the dedicated server's UDP socket")
+    p.add_argument("--server-index", type=int, default=0,
+                    help="which allowlisted server this bridge fronts; tokens "
+                         "minted for a different index are refused")
+    p.add_argument("--no-auth", action="store_true",
+                    help="relay without checking tokens. For local debugging "
+                         "only -- this makes the bridge an open relay to the "
+                         "game server for anyone who can reach the port.")
     args = p.parse_args()
+
+    # Secret from the environment, never a flag: command lines are visible to
+    # every user on the box via ps.
+    secret = os.environ.get("LIVE_BRIDGE_SECRET")
+    if args.no_auth:
+        secret = None
+        log.warning("running WITHOUT token auth (--no-auth): open relay")
+    elif not secret:
+        p.error("LIVE_BRIDGE_SECRET is not set (or pass --no-auth for local debugging)")
 
     listen_host, listen_port = args.listen.rsplit(":", 1)
     target_host, target_port_s = args.target.rsplit(":", 1)
@@ -203,14 +305,33 @@ def main():
     # source address (see next_loopback_source).
     conn_counter = itertools.count()
 
+    # playerId -> active websocket. One bridge, one process, so a plain dict
+    # is the whole of "server-side session tracking" the brief asks about.
+    sessions = {}
+
     async def handler(ws):
-        await handle_client(ws, target_host, target_port, stats, next(conn_counter))
+        await handle_client(ws, target_host, target_port, stats, next(conn_counter),
+                            secret=secret, server_index=args.server_index,
+                            sessions=sessions)
+
+    def select_subprotocol(ws, subprotocols):
+        """Echo the client's offer back.
+
+        The token rides in Sec-WebSocket-Protocol, and a browser aborts the
+        handshake unless the server names one of the offered protocols in its
+        reply. So this has to accept the token string itself as the
+        "protocol" -- the header is being used as a credential channel, which
+        is a well-worn trick precisely because browsers give you nowhere else
+        to put one on a WebSocket.
+        """
+        return subprotocols[0] if subprotocols else None
 
     async def run():
         asyncio.create_task(reporter(stats))
         # max_size=None: JK2 packets are small, but no reason to impose the
         # library's 1MB-message default on a UDP relay.
-        async with websockets.serve(handler, listen_host, int(listen_port), max_size=None):
+        async with websockets.serve(handler, listen_host, int(listen_port), max_size=None,
+                                    select_subprotocol=select_subprotocol):
             log.info("listening on %s, relaying to %s:%d", args.listen, target_host, target_port)
             await asyncio.Future()  # run forever
 
