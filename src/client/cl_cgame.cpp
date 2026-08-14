@@ -1576,6 +1576,25 @@ void CL_FirstSnapshot( void ) {
 	// decides whether the entity stream parses at all.
 	Com_Printf( "[JKD_LIVE_CONNECT] first snapshot received, now active (gameversion=%d)\n",
 		(int)MV_GetCurrentGameversion() );
+	{
+		// Force spectator the instant we go active, as a reliable command so
+		// it cannot be dropped. Replaces the old "wait 300; cmd team
+		// spectator" queued at connect time, whose frame count varied with
+		// load and was never a guarantee. A browser viewer must never occupy
+		// a play slot or show up in the match; the server keeps us spectating
+		// because we never request a team.
+		//
+		// Re-asserting this if the server later force-moved us onto a play
+		// team would mean reading ps.persistant[PERS_TEAM] -- a game-module
+		// layout the engine has no business knowing -- so it is not done here.
+		// It is also not needed: a client that never requests a team is not
+		// moved onto one. If that ever changes, the re-assert belongs in
+		// cgame, which does know the team semantics.
+		extern int jkd_liveSpectate;
+		if ( jkd_liveSpectate ) {
+			CL_AddReliableCommand( "team spectator" );
+		}
+	}
 #endif
 
 	WIN_SetTaskbarState(TBS_NOTIFY, 0, 0);

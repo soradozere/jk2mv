@@ -45,18 +45,20 @@
 <body>
 
 <div id="controls">
-  <label>Bridge address (host:port, no ws://)
-    <input id="addr" placeholder="34.123.45.67:8080" autocomplete="off">
+  <label>Server
+    <select id="server"><option>booting…</option></select>
   </label>
   <label>Version
     <select id="ver">
-      <option value="0">auto-detect</option>
-      <option value="2" selected>force 1.02</option>
+      <option value="0" selected>auto-detect</option>
+      <option value="2">force 1.02</option>
       <option value="4">force 1.04</option>
     </select>
   </label>
   <button id="connectBtn" disabled>Connect</button>
+  <button id="disconnectBtn" disabled>Disconnect</button>
   <span id="status">booting engine…</span>
+  <span id="connState">state: —</span>
 </div>
 
 <canvas id="canvas"></canvas>
@@ -67,7 +69,13 @@
 const logEl = document.getElementById("log");
 const statusEl = document.getElementById("status");
 const connectBtn = document.getElementById("connectBtn");
-const addrInput = document.getElementById("addr");
+const disconnectBtn = document.getElementById("disconnectBtn");
+const serverSel = document.getElementById("server");
+const connStateEl = document.getElementById("connState");
+
+// Bound after the engine boots.
+let jkd = null;
+const STATE_NAMES = { 0: "disconnected", 1: "connecting", 2: "active" };
 
 function log(text, cls) {
   console.log("[harness]", text);
@@ -108,7 +116,32 @@ function bootEngine() {
       log("JKD_ConnectSpectate not found in this build -- rebuild with -DJKD_LIVE_CONNECT=ON", "err");
       return;
     }
+    jkd = {
+      connect: Module.cwrap("JKD_ConnectSpectate", "number", ["number"]),
+      disconnect: Module.cwrap("JKD_Disconnect", null, []),
+      state: Module.cwrap("JKD_GetConnectionState", "number", []),
+      serverCount: Module.cwrap("JKD_GetServerCount", "number", []),
+      serverName: Module.cwrap("JKD_GetServerName", "string", ["number"]),
+      forceVersion: Module.cwrap("JKD_ForceGameversion", null, ["number"]),
+    };
+    // Populate the picker from the engine's own allowlist -- the addresses
+    // live in C, the page only ever learns names and indices.
+    serverSel.innerHTML = "";
+    const n = jkd.serverCount();
+    for (let i = 0; i < n; i++) {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = jkd.serverName(i);
+      serverSel.appendChild(opt);
+    }
     connectBtn.disabled = false;
+    // Poll the engine for connection state; it owns the truth, we mirror it.
+    setInterval(() => {
+      if (!jkd) return;
+      const s = jkd.state();
+      connStateEl.textContent = `state: ${STATE_NAMES[s] || s}`;
+      disconnectBtn.disabled = (s === 0);
+    }, 500);
   };
 
   const script = document.createElement("script");
@@ -118,20 +151,28 @@ function bootEngine() {
 }
 
 connectBtn.addEventListener("click", () => {
-  const addr = addrInput.value.trim();
-  if (!addr) {
-    log("enter a bridge address first", "err");
-    return;
-  }
+  if (!jkd) return;
+  const idx = parseInt(serverSel.value, 10);
   const ver = parseInt(document.getElementById("ver").value, 10);
-  log(`calling JKD_ConnectSpectate("${addr}"), version=${ver}`);
+  log(`connecting to server #${idx} (${jkd.serverName(idx)}), version=${ver}`);
   try {
     // Before connecting: CL_ServerInfoPacket only adopts the server's
     // version while the current one is still UNDEF.
-    if (ver) Module.ccall("JKD_ForceGameversion", null, ["number"], [ver]);
-    Module.ccall("JKD_ConnectSpectate", null, ["string"], [addr]);
+    if (ver) jkd.forceVersion(ver);
+    const ok = jkd.connect(idx);
+    if (!ok) log(`refused: server #${idx} not in the engine allowlist`, "err");
   } catch (e) {
-    log(`ccall failed: ${e}`, "err");
+    log(`connect failed: ${e}`, "err");
+  }
+});
+
+disconnectBtn.addEventListener("click", () => {
+  if (!jkd) return;
+  log("disconnecting");
+  try {
+    jkd.disconnect();
+  } catch (e) {
+    log(`disconnect failed: ${e}`, "err");
   }
 });
 

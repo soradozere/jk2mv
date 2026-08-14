@@ -934,21 +934,94 @@ EMSCRIPTEN_KEEPALIVE void JKD_ForceGameversion( int version ) {
 	Com_Printf( "[JKD_LIVE_CONNECT] gameversion forced to %d (0 = auto-detect)\n", version );
 }
 
-EMSCRIPTEN_KEEPALIVE void JKD_ConnectSpectate( const char *serverAddr ) {
-	Com_Printf( "[JKD_LIVE_CONNECT] connecting to %s (gameversion currently %d)\n",
-		serverAddr, (int)MV_GetCurrentGameversion() );
-	Cbuf_AddText( va( "connect %s\n", serverAddr ) );
-	// "wait" counts frames, not wall time -- the same mechanism render.cfg
-	// uses to sequence camera cvars after a connect/demo load. Long enough
-	// to clear the challenge/connect handshake before forcing team; the
-	// command buffer just holds this until then, whether that's one round
-	// trip or several retries.
-	Cbuf_AddText( "wait 300\n" );
-	// "cmd", not a bare "team": team is a *server* command (g_cmds.c's
-	// ClientCommand), so the client console has no such command and said so --
-	// `Unknown command "team"`. cmd forwards the rest as a reliable command,
-	// which is how every in-game team change actually reaches the server.
-	Cbuf_AddText( "cmd team spectator\n" );
+// The page asked for a live spectate session. Set by JKD_ConnectSpectate,
+// cleared by JKD_Disconnect. Drives spectator-team enforcement at CA_ACTIVE
+// (CL_FirstSnapshot reads it via extern).
+//
+// Deliberately NOT cleared by CL_Disconnect: CL_Connect_f calls CL_Disconnect
+// as part of establishing our own connection, so clearing there would lose the
+// intent before we ever go active -- the same order-of-operations trap that
+// made the gameversion force a silent no-op the first time round.
+int jkd_liveSpectate = 0;
+
+// Compiled-in allowlist of bridge endpoints. The page picks an INDEX; the
+// address strings never cross from JS, so a hostile URL param or console call
+// can only ever reach a server we shipped.
+//
+// This is a convenience/UX guard, NOT the security boundary. Anyone can edit
+// the wasm or call the export with any in-range index, so the authoritative
+// allowlist must live in the bridge -- the one component the viewer's browser
+// does not control (Phase 2). Endpoints are host:port that Emscripten turns
+// into a ws:// URL; they become wss:// bridge endpoints once Caddy fronts them.
+typedef struct {
+	const char *name;		// label for the page's server picker
+	const char *endpoint;	// host:port -> ws://host:port
+} jkd_server_t;
+
+static const jkd_server_t jkd_servers[] = {
+	{ "Soracle Test", "34.150.239.4:8080" },
+};
+#define JKD_NUM_SERVERS ( (int)( sizeof( jkd_servers ) / sizeof( jkd_servers[0] ) ) )
+
+EMSCRIPTEN_KEEPALIVE int JKD_GetServerCount( void ) {
+	return JKD_NUM_SERVERS;
+}
+
+EMSCRIPTEN_KEEPALIVE const char *JKD_GetServerName( int index ) {
+	if ( index < 0 || index >= JKD_NUM_SERVERS ) {
+		return "";
+	}
+	return jkd_servers[ index ].name;
+}
+
+// Connect to an allowlisted server by index. Returns 1 if the connect was
+// issued, 0 if the index was out of range (refused). No address ever comes
+// from the caller -- only a choice among what we shipped.
+EMSCRIPTEN_KEEPALIVE int JKD_ConnectSpectate( int serverIndex ) {
+	if ( serverIndex < 0 || serverIndex >= JKD_NUM_SERVERS ) {
+		Com_Printf( "[JKD_LIVE_CONNECT] refused: server %d not in allowlist (have 0..%d)\n",
+			serverIndex, JKD_NUM_SERVERS - 1 );
+		return 0;
+	}
+	jkd_liveSpectate = 1;
+	Com_Printf( "[JKD_LIVE_CONNECT] connecting to %s (%s)\n",
+		jkd_servers[ serverIndex ].name, jkd_servers[ serverIndex ].endpoint );
+	Cbuf_AddText( va( "connect %s\n", jkd_servers[ serverIndex ].endpoint ) );
+	// Spectator team is enforced deterministically at CA_ACTIVE
+	// (CL_FirstSnapshot), not queued here on a frame-count guess.
+	return 1;
+}
+
+// Clean disconnect. CL_Disconnect sends the "disconnect" reliable command and
+// flushes it (three packets) when state >= CA_CONNECTED, so the server frees
+// our slot immediately rather than waiting out the timeout -- exactly what a
+// closed tab or a "still watching?" timeout needs. qfalse: no UI menu to raise
+// on a headless page.
+EMSCRIPTEN_KEEPALIVE void JKD_Disconnect( void ) {
+	jkd_liveSpectate = 0;
+	Com_Printf( "[JKD_LIVE_CONNECT] disconnecting\n" );
+	CL_Disconnect( qfalse );
+}
+
+// Connection state for the page: 0 disconnected, 1 connecting, 2 active. A
+// small stable contract rather than the raw CA_* values, which could renumber.
+// "Failed" is not a distinct value: a rejected or timed-out attempt lands back
+// at 0, and the page -- which knows it asked to connect -- treats "returned to
+// 0 without ever reaching 2" as failure. That pairs with the reconnect prompt
+// in Phase 4, so the reason signal lives where the retry decision does.
+EMSCRIPTEN_KEEPALIVE int JKD_GetConnectionState( void ) {
+	switch ( cls.state ) {
+	case CA_ACTIVE:
+		return 2;
+	case CA_CONNECTING:
+	case CA_CHALLENGING:
+	case CA_CONNECTED:
+	case CA_LOADING:
+	case CA_PRIMED:
+		return 1;
+	default:
+		return 0;
+	}
 }
 #endif
 }
