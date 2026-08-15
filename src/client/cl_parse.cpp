@@ -7,7 +7,7 @@
 #include "../qcommon/INetProfile.h"
 #endif
 
-#ifdef JKD_LIVE_CONNECT
+#ifdef JKD_LIVE_DEBUG
 // Everything after the parse failure is aftermath: ERR_DROP disconnects the
 // client, the server keeps streaming for a while, and every one of those
 // packets is discarded with a log line. That buried the actual evidence under
@@ -169,7 +169,7 @@ void CL_ParsePacketEntities( msg_t *msg, clSnapshot_t *oldframe, clSnapshot_t *n
 		}
 
 		if ( msg->readcount > msg->cursize ) {
-#ifdef JKD_LIVE_CONNECT
+#ifdef JKD_LIVE_DEBUG
 			// Which failure is this? A message that arrived SHORT (truncated
 			// somewhere in transport) and a message that arrived whole but was
 			// decoded with the wrong field layout both end here, and they need
@@ -800,7 +800,7 @@ void CL_ParseCommandString( msg_t *msg ) {
 	ClReadProf().AddField("svc_serverCommand",endBytes-startBytes);
 #endif
 
-#ifdef JKD_LIVE_CONNECT
+#ifdef JKD_LIVE_DEBUG
 	// Into the ring, dumped on failure. Two suspects would show up here: an
 	// NWH team-overlay update (g_teamoverlayupdate is 1000ms, and death is
 	// ~1s after active), or the server's response to our own first reliable
@@ -856,7 +856,7 @@ void CL_ParseServerMessage( msg_t *msg ) {
 
 		cmd = MSG_ReadByte( msg );
 
-#ifdef JKD_LIVE_CONNECT
+#ifdef JKD_LIVE_DEBUG
 		// Recorded silently into the ring; JKD_DumpRings prints the recent
 		// history when the parse fails. (A printed version of this existed
 		// and its cap expired right before the failure, twice.)

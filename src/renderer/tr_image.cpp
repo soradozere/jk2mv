@@ -2572,7 +2572,7 @@ image_t	*R_FindImageFileNew( const char *name, const upload_t *upload, int glWra
 	//
 	R_LoadImage( name, &pic, &width, &height, &format );
 	if ( pic == NULL ) {                                    // if we dont get a successful load
-#ifdef JKD_LIVE_CONNECT
+#ifdef JKD_LIVE_DEBUG
 		// Silent until now, which is exactly why blank-glyph text went
 		// undiagnosed for weeks: a failed load returns NULL, the shader falls
 		// back to the default white texture, and every glyph draws as an empty

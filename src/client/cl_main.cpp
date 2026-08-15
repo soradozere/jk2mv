@@ -3539,12 +3539,12 @@ void CL_PacketEvent( netadr_t from, msg_t *msg ) {
 	}
 
 	if ( cls.state < CA_CONNECTED ) {
-#ifdef JKD_LIVE_CONNECT
+#ifdef JKD_LIVE_DEBUG
 		{
 			extern int jkd_logMuted;
 			static int jkd_earlyDrops = 0;
 			if ( !jkd_logMuted && jkd_earlyDrops < 20 ) {
-				Com_Printf( "[JKD_LIVE_CONNECT] dropped sequenced packet (%d bytes): state=%d < CA_CONNECTED\n",
+				Com_Printf( "[JKD_LIVE_DEBUG] dropped sequenced packet (%d bytes): state=%d < CA_CONNECTED\n",
 					msg->cursize, (int)cls.state );
 				jkd_earlyDrops++;
 			}
@@ -3562,7 +3562,7 @@ void CL_PacketEvent( netadr_t from, msg_t *msg ) {
 	// packet from server
 	//
 	if ( !NET_CompareAdr( from, clc.netchan.remoteAddress ) ) {
-#ifdef JKD_LIVE_CONNECT
+#ifdef JKD_LIVE_DEBUG
 		// Com_DPrintf, i.e. invisible without developer 1 -- which is why
 		// packets appeared to vanish between the socket and the netchan with
 		// no explanation at all. Emscripten's socket layer synthesises peer
@@ -3572,7 +3572,7 @@ void CL_PacketEvent( netadr_t from, msg_t *msg ) {
 		{
 			static int jkd_adrDrops = 0;
 			if ( jkd_adrDrops < 20 ) {
-				Com_Printf( "[JKD_LIVE_CONNECT] DROPPED: packet from %s does not match server %s (%d bytes)\n",
+				Com_Printf( "[JKD_LIVE_DEBUG] DROPPED: packet from %s does not match server %s (%d bytes)\n",
 					NET_AdrToString( from ), NET_AdrToString( clc.netchan.remoteAddress ), msg->cursize );
 				jkd_adrDrops++;
 			}

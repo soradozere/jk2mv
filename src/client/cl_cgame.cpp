@@ -1571,11 +1571,17 @@ void CL_FirstSnapshot( void ) {
 	cls.state = CA_ACTIVE;
 
 #ifdef JKD_LIVE_CONNECT
+#ifdef JKD_LIVE_DEBUG
 	// The gameversion here is the one MSG_ReadDeltaEntity is using to choose
 	// between the 1.02 and 1.04 entity field tables -- the decision that
 	// decides whether the entity stream parses at all.
-	Com_Printf( "[JKD_LIVE_CONNECT] first snapshot received, now active (gameversion=%d)\n",
+	//
+	// Debug-gated, not capability-gated: this point is reached whenever
+	// cls.state goes active, demo playback included, so on the shipped engine
+	// it would print at every demo the library opens.
+	Com_Printf( "[JKD_LIVE_DEBUG] first snapshot received, now active (gameversion=%d)\n",
 		(int)MV_GetCurrentGameversion() );
+#endif
 	{
 		// Force spectator the instant we go active, as a reliable command so
 		// it cannot be dropped. Replaces the old "wait 300; cmd team

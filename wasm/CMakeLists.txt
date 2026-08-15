@@ -11,10 +11,23 @@ project(jk2mv_wasm C CXX)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_C_STANDARD 11)
 
-# Off by default: this is a throwaway prototype path (live-spectate bridge
-# brief), not part of the normal viewer build. It exists so the JS harness
-# can drive JKD_ConnectSpectate; nothing else changes when this is OFF.
-option(JKD_LIVE_CONNECT "Enable the spectate-bridge connect path (dev prototype only)" OFF)
+# The live-spectate capability: the JKD_Connect* exports, the server
+# allowlist, and forcing spectator on the live path.
+option(JKD_LIVE_CONNECT "Enable the spectate-bridge connect path" OFF)
+
+# The diagnostics written while chasing the netchan desync. Deliberately a
+# separate switch, because it is a separate decision.
+#
+# A shipped engine needs JKD_LIVE_CONNECT on -- /live cannot work without it --
+# but one engine serves both /live and the demo library, and several of these
+# fire on paths demo playback uses: IMAGE LOAD FAILED prints dozens of lines
+# per demo, the first-snapshot print fires whenever cls.state goes active, and
+# the parse ring buffers record on every server command. Someone watching a
+# demo should not be reading live-spectate debug output, and the ring buffers
+# should not be costing them anything.
+#
+# Turn on by hand when working on the connect path.
+option(JKD_LIVE_DEBUG "Verbose live-spectate diagnostics (developer only)" OFF)
 
 # ============================================================================
 # Paths
@@ -60,6 +73,10 @@ add_compile_definitions(
 
 if(JKD_LIVE_CONNECT)
     add_compile_definitions(JKD_LIVE_CONNECT)
+endif()
+
+if(JKD_LIVE_DEBUG)
+    add_compile_definitions(JKD_LIVE_DEBUG)
 endif()
 
 # Emscripten ports (SDL2, GLES) need these -s flags at COMPILE time too, not
