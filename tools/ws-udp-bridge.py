@@ -29,6 +29,7 @@ import itertools
 import json
 import logging
 import os
+import socket as _socket
 import time
 
 import websockets
@@ -266,6 +267,18 @@ async def handle_client(ws, target_host, target_port, stats, source_index,
                         secret=None, server_index=0, sessions=None,
                         sticky_sources=None):
     peer = ws.remote_address
+
+    # Disable Nagle on this connection's TCP socket. The asyncio flavour of the
+    # websockets library never does (the sync flavour does), and Nagle is built
+    # for exactly the traffic we produce: a steady stream of small messages.
+    # It holds each one back until the previous is acknowledged, and together
+    # with delayed ACKs on the far side that turns "one snapshot every 10ms"
+    # into "a clump of several every 40" -- which the viewer sees as stutter,
+    # because the client interpolates against arrival timing. Snapshots are
+    # latency-critical and tiny; batching them saves nothing worth having.
+    tcp = ws.transport.get_extra_info("socket")
+    if tcp is not None:
+        tcp.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
 
     # Authenticate BEFORE a single packet is relayed.
     #
