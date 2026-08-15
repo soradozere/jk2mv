@@ -263,7 +263,8 @@ def next_loopback_source(counter, target_host):
 
 
 async def handle_client(ws, target_host, target_port, stats, source_index,
-                        secret=None, server_index=0, sessions=None):
+                        secret=None, server_index=0, sessions=None,
+                        sticky_sources=None):
     peer = ws.remote_address
 
     # Authenticate BEFORE a single packet is relayed.
@@ -331,28 +332,69 @@ async def handle_client(ws, target_host, target_port, stats, source_index,
         stats.to_client_packets += 1
         outbox.put_nowait(data)
 
-    local_addr = None
     src = next_loopback_source(source_index, target_host)
-    if src:
-        local_addr = (src, 0)
-    try:
-        transport, _ = await loop.create_datagram_endpoint(
+
+    # Come back on the same source address a viewer used last time.
+    #
+    # The game server already knows how to handle this: SV_DirectConnect has a
+    # "if there is already a slot for this ip, reuse it" path, taken when the
+    # address matches and either the qport or the source port does. A reloaded
+    # page generates a fresh qport, so the source port is the only handle left
+    # -- and with an ephemeral port every reload looked like a stranger, so the
+    # server kept the abandoned client until it timed out and the viewer came
+    # back alongside their own ghost.
+    #
+    # Keyed on the account, which is the thing that actually persists across a
+    # reload. Without auth there is no such key and this simply does not apply.
+    sticky = sticky_sources.get(player_id) if (player_id and sticky_sources is not None) else None
+    local_addr = sticky or ((src, 0) if src else None)
+
+    async def bind(addr):
+        return await loop.create_datagram_endpoint(
             lambda: UdpProtocol(forward_to_ws),
             remote_addr=(target_host, target_port),
-            local_addr=local_addr,
+            local_addr=addr,
         )
-        if src:
-            log.info("  viewer %s using source %s", peer, src)
-    except OSError as e:
-        # Binding a loopback alias can fail on platforms where 127.0.0.0/8
-        # is not wholly local (macOS needs explicit aliases). Fall back to
-        # the default source rather than refusing the viewer -- they just
-        # count against the per-IP limit again.
-        log.warning("could not bind source %s (%s); using default", src, e)
-        transport, _ = await loop.create_datagram_endpoint(
-            lambda: UdpProtocol(forward_to_ws),
-            remote_addr=(target_host, target_port),
-        )
+
+    transport = None
+
+    # Wait for the sticky port rather than giving up on it the moment it is
+    # busy. Connections arrive in overlapping pairs -- every dial is followed
+    # by a second one a few hundred ms later, which supersedes it -- so the
+    # port is routinely still held by the session being replaced. Failing fast
+    # meant the *surviving* socket was the one that fell back to a random port,
+    # which is precisely the case this whole mechanism exists to fix.
+    if sticky:
+        for _ in range(12):
+            try:
+                transport, _ = await bind(sticky)
+                break
+            except OSError:
+                await asyncio.sleep(0.05)
+        if transport is None:
+            log.warning("sticky source %s stayed busy; falling back", sticky)
+
+    if transport is None:
+        for attempt in ((src, 0) if src else None, None):
+            try:
+                transport, _ = await bind(attempt)
+                break
+            except OSError as e:
+                # Binding a loopback alias is refused where 127.0.0.0/8 is not
+                # wholly local (macOS needs explicit aliases). Fall back rather
+                # than refuse the viewer -- the worst case is the behaviour we
+                # had before any of this.
+                log.warning("could not bind source %s (%s); falling back", attempt, e)
+
+    if transport is None:
+        log.error("no usable source address for %s; dropping", peer)
+        await ws.close(code=1011, reason="no socket")
+        return
+
+    bound = transport.get_extra_info("sockname")
+    if player_id and bound and sticky_sources is not None:
+        sticky_sources[player_id] = bound
+    log.info("  viewer %s using source %s", peer, bound)
 
     async def pump():
         while True:
@@ -448,10 +490,16 @@ def main():
     # is the whole of "server-side session tracking" the brief asks about.
     sessions = {}
 
+    # playerId -> the (host, port) that account last talked to the game server
+    # from, so a reload reconnects into its own slot instead of arriving as a
+    # stranger beside its own abandoned client. Never pruned: an entry is two
+    # small values, and forgetting one costs exactly the bug it prevents.
+    sticky_sources = {}
+
     async def handler(ws):
         await handle_client(ws, target_host, target_port, stats, next(conn_counter),
                             secret=secret, server_index=args.server_index,
-                            sessions=sessions)
+                            sessions=sessions, sticky_sources=sticky_sources)
 
     def select_subprotocol(ws, subprotocols):
         """Echo the client's offer back.
