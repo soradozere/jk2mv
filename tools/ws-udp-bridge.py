@@ -24,7 +24,9 @@ import argparse
 import asyncio
 import hashlib
 import hmac
+import http
 import itertools
+import json
 import logging
 import os
 import time
@@ -97,6 +99,7 @@ class Stats:
         self.to_client_packets = 0
         self.to_server_bytes = 0
         self.to_server_packets = 0
+        self.viewers = 0
 
 
 async def reporter(stats, interval=10):
@@ -114,6 +117,119 @@ async def reporter(stats, interval=10):
             down / interval / 1024, stats.to_client_packets,
             up / interval / 1024, stats.to_server_packets,
         )
+
+
+def parse_status_response(data):
+    """Pull the infostring and client count out of a Quake 3 statusResponse.
+
+    Format is `\\xff\\xff\\xff\\xffstatusResponse\\n\\key\\value\\...\\n` followed by
+    one line per connected client. Keys are latin-1 rather than utf-8 on
+    purpose: JK2 names carry `^` colour codes and arbitrary high bytes, and a
+    strict utf-8 decode would raise on a player whose name happens to be
+    malformed -- which is exactly the sort of thing that takes a status page
+    down at the worst moment.
+    """
+    if not data.startswith(b"\xff\xff\xff\xff"):
+        return None
+    body = data[4:]
+    if not body.startswith(b"statusResponse"):
+        return None
+
+    lines = body.split(b"\n")
+    if len(lines) < 2:
+        return None
+
+    info = {}
+    fields = lines[1].decode("latin-1").split("\\")
+    # The infostring opens with a separator, so the first element is empty and
+    # the real content is key/value pairs from index 1.
+    for i in range(1, len(fields) - 1, 2):
+        info[fields[i]] = fields[i + 1]
+
+    clients = sum(1 for line in lines[2:] if line.strip())
+    return {"info": info, "clients": clients}
+
+
+async def query_server_status(target_host, target_port, timeout=1.0):
+    """Ask the game server what is on, out-of-band.
+
+    Deliberately a separate socket from the relay path: this is the engine's
+    own `getstatus` query, the same one a server browser sends, so it works
+    without cooperation from the game and tells us the map and who is
+    connected even when no viewer is watching.
+    """
+    loop = asyncio.get_running_loop()
+    reply = loop.create_future()
+
+    class _StatusProtocol(asyncio.DatagramProtocol):
+        def datagram_received(self, data, addr):
+            if not reply.done():
+                reply.set_result(data)
+
+        def error_received(self, exc):
+            if not reply.done():
+                reply.set_exception(exc)
+
+    try:
+        transport, _ = await loop.create_datagram_endpoint(
+            _StatusProtocol, remote_addr=(target_host, target_port))
+    except OSError as exc:
+        log.debug("status query could not open a socket: %s", exc)
+        return None
+
+    try:
+        transport.sendto(b"\xff\xff\xff\xffgetstatus\n")
+        data = await asyncio.wait_for(reply, timeout)
+    except (asyncio.TimeoutError, OSError):
+        # A server that is down or restarting simply does not answer. That is
+        # a normal state for this endpoint to report, not an error to log
+        # loudly every few seconds.
+        return None
+    finally:
+        transport.close()
+
+    try:
+        return parse_status_response(data)
+    except Exception:
+        log.warning("unparseable statusResponse from %s:%d", target_host, target_port)
+        return None
+
+
+async def status_poller(state, target_host, target_port, interval=5):
+    """Keep the cached server status warm.
+
+    Polled on a timer rather than queried per request so that a page open in
+    twenty tabs cannot turn into twenty `getstatus` packets a second at the
+    game server. The HTTP handler then answers from memory and never blocks
+    the WebSocket accept path.
+    """
+    while True:
+        status = await query_server_status(target_host, target_port)
+        state["status"] = status
+        state["checked_at"] = time.time()
+        await asyncio.sleep(interval)
+
+
+def status_payload(state, stats):
+    status = state.get("status")
+    info = (status or {}).get("info", {})
+    clients = (status or {}).get("clients", 0)
+    viewers = stats.viewers
+
+    # `clients` counts everyone the server has, and our viewers are real
+    # spectator clients on it -- so they are in that number. Subtract them for
+    # a "who is actually playing" figure, floored because the two counts are
+    # sampled at different moments and a viewer can leave between them.
+    return {
+        "online": status is not None,
+        "checkedAt": state.get("checked_at", 0),
+        "viewers": viewers,
+        "clients": clients,
+        "players": max(clients - viewers, 0),
+        "map": info.get("mapname"),
+        "hostname": info.get("sv_hostname"),
+        "gametype": info.get("g_gametype"),
+    }
 
 
 def next_loopback_source(counter, target_host):
@@ -245,6 +361,11 @@ async def handle_client(ws, target_host, target_port, stats, source_index,
 
     pump_task = asyncio.create_task(pump())
 
+    # Counted here rather than from `sessions`, which only fills in when token
+    # auth is on -- a --no-auth debugging run would otherwise report nobody
+    # watching while people are watching.
+    stats.viewers += 1
+
     try:
         async for message in ws:
             if isinstance(message, str):
@@ -260,6 +381,7 @@ async def handle_client(ws, target_host, target_port, stats, source_index,
         # from the client and like nothing at all from here.
         log.exception("relay error for %s", peer)
     finally:
+        stats.viewers -= 1
         pump_task.cancel()
         try:
             await pump_task
@@ -309,6 +431,14 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
+    # The library logs every HTTP request that process_request answers as
+    # "connection rejected (200 OK)" -- which is what a perfectly good /status
+    # poll looks like from inside websockets. Every viewer polls it, so at INFO
+    # that is a line every few seconds, burying the connect/disconnect events
+    # this log exists for. Warnings and errors still come through, including
+    # the handshake failures that are worth seeing.
+    logging.getLogger("websockets.server").setLevel(logging.WARNING)
+
     stats = Stats()
     # Monotonic per-connection counter, so each viewer gets its own loopback
     # source address (see next_loopback_source).
@@ -335,12 +465,47 @@ def main():
         """
         return subprotocols[0] if subprotocols else None
 
+    # Last known server status, refreshed on a timer by status_poller.
+    status_state = {"status": None, "checked_at": 0}
+
+    def process_request(connection, request):
+        """Serve GET /status; let everything else continue as a WebSocket.
+
+        Unauthenticated, and deliberately so: it answers "is anything on and
+        how many people are watching", which is exactly what the page needs
+        *before* it asks anyone to sign in. It exposes only what a server
+        browser already shows the whole internet -- map, hostname, gametype,
+        counts -- and no player names or identities.
+
+        Answered from cache so this cannot be used to make the bridge flood
+        the game server, and returning None hands the connection back to the
+        normal WebSocket path untouched.
+        """
+        if request.path.split("?")[0] != "/status":
+            return None
+        body = json.dumps(status_payload(status_state, stats)) + "\n"
+        response = connection.respond(http.HTTPStatus.OK, body)
+        # `respond` has already set text/plain, and Headers is a multidict --
+        # assigning would append a second Content-Type rather than replace the
+        # first, leaving the response ambiguous and the browser free to believe
+        # the wrong one. Drop it before setting ours.
+        del response.headers["Content-Type"]
+        response.headers["Content-Type"] = "application/json"
+        # The page is served from Soracle's origin, not this one, so it has to
+        # be allowed to read the response. Safe to open: the payload is public
+        # information and the endpoint takes no input.
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     async def run():
         asyncio.create_task(reporter(stats))
+        asyncio.create_task(status_poller(status_state, target_host, target_port))
         # max_size=None: JK2 packets are small, but no reason to impose the
         # library's 1MB-message default on a UDP relay.
         async with websockets.serve(handler, listen_host, int(listen_port), max_size=None,
-                                    select_subprotocol=select_subprotocol):
+                                    select_subprotocol=select_subprotocol,
+                                    process_request=process_request):
             log.info("listening on %s, relaying to %s:%d", args.listen, target_host, target_port)
             await asyncio.Future()  # run forever
 
