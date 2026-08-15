@@ -2572,6 +2572,13 @@ image_t	*R_FindImageFileNew( const char *name, const upload_t *upload, int glWra
 	//
 	R_LoadImage( name, &pic, &width, &height, &format );
 	if ( pic == NULL ) {                                    // if we dont get a successful load
+#ifdef JKD_LIVE_CONNECT
+		// Silent until now, which is exactly why blank-glyph text went
+		// undiagnosed for weeks: a failed load returns NULL, the shader falls
+		// back to the default white texture, and every glyph draws as an empty
+		// box with nothing anywhere saying an image was missing.
+		ri.Printf( PRINT_ALL, "[JKD] IMAGE LOAD FAILED: %s\n", name );
+#endif
 		return NULL;                                        // bail
 	}
 

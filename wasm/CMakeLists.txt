@@ -513,13 +513,13 @@ else()
     )
 endif()
 
-if(JKD_LIVE_CONNECT)
-    # Diagnosing the WebSocket<->UDP bridge prototype: this surfaces every
-    # socket open/close/send event libsockfs.js sees, which plain engine
-    # logging can't -- the engine doesn't know why a peer connection died,
-    # only that it did.
-    list(APPEND EMS_LINK_FLAGS "-sSOCKET_DEBUG=1")
-endif()
+# -sSOCKET_DEBUG=1 was here during the netchan investigation. It logs every
+# socket open/close/send, which was invaluable for finding out why peer
+# connections died -- and is unusable once a connection actually works: at
+# ~30 packets a second it floods the console, drowns the engine's own output
+# (which is how a diagnostic added later went unseen), and burns time
+# formatting strings for every datagram. Re-enable by hand for a session when
+# chasing something at that layer; do not leave it on.
 
 string(REPLACE ";" " " EMS_LINK_FLAGS_STR "${EMS_LINK_FLAGS}")
 set_target_properties(jk2mv_wasm PROPERTIES

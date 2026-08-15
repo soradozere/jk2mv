@@ -4168,6 +4168,32 @@ static void CL_WasmFeed_f( void ) {
 		}
 	}, Cmd_Argv( 1 ) );
 }
+
+/*
+====================
+CL_WasmChat_f
+
+Hands the page one line of chat: jkd_chat "<text>".
+
+Separate from jkd_feed rather than folded into it: the feed is the kill/flag
+ticker, which the demo viewer wants and deliberately excludes chat from, while
+this exists for live spectating where chat is the point. Keeping them apart
+means neither has to filter the other.
+
+Demo playback never produces these -- the engine drops chat before cgame sees
+it -- so this cannot leak chat into the demo viewer.
+====================
+*/
+static void CL_WasmChat_f( void ) {
+	if ( Cmd_Argc() < 2 ) {
+		return;
+	}
+	EM_ASM( {
+		if ( window.JKD_onChat ) {
+			window.JKD_onChat( UTF8ToString( $0 ) );
+		}
+	}, Cmd_Argv( 1 ) );
+}
 #endif
 
 /*
@@ -4352,6 +4378,7 @@ void CL_Init( void ) {
 	Cmd_AddCommand ("jkd_obituary", CL_WasmObituary_f);
 	Cmd_AddCommand ("jkd_centerprint", CL_WasmCenterPrint_f);
 	Cmd_AddCommand ("jkd_feed", CL_WasmFeed_f);
+	Cmd_AddCommand ("jkd_chat", CL_WasmChat_f);
 #endif
 
 	CL_InitRef();
