@@ -1084,6 +1084,7 @@ cvar_t	*cl_timeout;
 cvar_t	*cl_maxpackets;
 cvar_t	*cl_packetdup;
 cvar_t	*cl_timeNudge;
+cvar_t	*com_slowDriftAdjustMaxFPS;
 cvar_t	*cl_showTimeDelta;
 cvar_t	*cl_freezeDemo;
 
@@ -4273,6 +4274,9 @@ void CL_Init( void ) {
 	cl_timeout = Cvar_Get ("cl_timeout", "200", 0);
 
 	cl_timeNudge = Cvar_Get ("cl_timeNudge", "0", CVAR_TEMP );
+	// See CL_AdjustTimeDelta. TomArrow's name and default, so his fork's
+	// documentation and the community's tuning folklore both apply here.
+	com_slowDriftAdjustMaxFPS = Cvar_Get ("com_slowDriftAdjustMaxFPS", "25", CVAR_ARCHIVE | CVAR_GLOBAL );
 	cl_shownet = Cvar_Get ("cl_shownet", "0", CVAR_TEMP );
 	cl_showSend = Cvar_Get ("cl_showSend", "0", CVAR_TEMP );
 	cl_showTimeDelta = Cvar_Get ("cl_showTimeDelta", "0", CVAR_TEMP );

@@ -1532,18 +1532,40 @@ void CL_AdjustTimeDelta( void ) {
 		}
 		cl.serverTimeDelta = ( cl.serverTimeDelta + newDelta ) >> 1;
 	} else {
-		// slow drift adjust, only move 1 or 2 msec
+		// slow drift adjust, only move 1 or 2 msec -- but not on every snapshot.
+		//
+		// Stock code runs this on every batch of new snapshots, which was tuned
+		// against snaps 20-30. At snaps 100 the client's sense of time gets
+		// corrected up to a hundred times a second, sawtoothing between "drift
+		// forward 1ms" and "knocked back 2ms" -- and every interpolated entity
+		// position wobbles with it. That is visible stutter with a perfectly
+		// clean lagometer, because nothing is being extrapolated; time itself
+		// is oscillating. Ported from TomArrow's fork ("avoid floaty physics
+		// with high snaps"), same cvar name and default so the community's
+		// existing knowledge applies.
+		{
+			static int oldSlowDriftServerTime = 0;
+			int minMsec = com_slowDriftAdjustMaxFPS->integer
+				? 1000 / com_slowDriftAdjustMaxFPS->integer : 0;
+			if ( minMsec > 200 ) {
+				minMsec = 200;
+			}
+			if ( !minMsec || cl.snap.serverTime < oldSlowDriftServerTime
+				|| ( cl.snap.serverTime - oldSlowDriftServerTime ) > minMsec ) {
 
-		// if any of the frames between this and the previous snapshot
-		// had to be extrapolated, nudge our sense of time back a little
-		// the granularity of +1 / -2 is too high for timescale modified frametimes
-		if ( com_timescale->value == 0 || com_timescale->value == 1 ) {
-			if ( cl.extrapolatedSnapshot ) {
-				cl.extrapolatedSnapshot = qfalse;
-				cl.serverTimeDelta -= 2;
-			} else {
-				// otherwise, move our sense of time forward to minimize total latency
-				cl.serverTimeDelta++;
+				// if any of the frames between this and the previous snapshot
+				// had to be extrapolated, nudge our sense of time back a little
+				// the granularity of +1 / -2 is too high for timescale modified frametimes
+				if ( com_timescale->value == 0 || com_timescale->value == 1 ) {
+					if ( cl.extrapolatedSnapshot ) {
+						cl.extrapolatedSnapshot = qfalse;
+						cl.serverTimeDelta -= 2;
+					} else {
+						// otherwise, move our sense of time forward to minimize total latency
+						cl.serverTimeDelta++;
+					}
+				}
+				oldSlowDriftServerTime = cl.snap.serverTime;
 			}
 		}
 	}
