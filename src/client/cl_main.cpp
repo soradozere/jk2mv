@@ -2110,6 +2110,34 @@ void CL_ForwardCommandToServer( const char *string ) {
 		return;
 	}
 
+#ifdef JKD_LIVE_CONNECT
+	// A browser spectator watches; it does not play, and it does not decide.
+	//
+	// Every client command reaches the server through this one function, which
+	// is the only place a rule like this can be enforced once. The engine
+	// forces spectator at the first snapshot, but that happens exactly once --
+	// with a console open, "team red" afterwards would walk a viewer into a
+	// live match as an extra player, and "callvote" would let anyone watching
+	// change the map out from under a game in progress.
+	//
+	// The spectator command we send ourselves does not come through here; it
+	// goes straight to CL_AddReliableCommand, so this cannot block it.
+	//
+	// Client-side only, and therefore not a security boundary -- someone can
+	// edit the wasm. It is a boundary against ordinary accidents and idle
+	// curiosity, which is what this actually needs to stop. The real answer if
+	// it is ever abused is server-side.
+	if ( jkd_liveSpectate ) {
+		static const char *jkd_blockedCommands[] = { "team", "callvote", "join" };
+		for ( size_t i = 0; i < ARRAY_LEN( jkd_blockedCommands ); i++ ) {
+			if ( !Q_stricmp( cmd, jkd_blockedCommands[i] ) ) {
+				Com_Printf( "You are watching this match, not playing in it.\n" );
+				return;
+			}
+		}
+	}
+#endif
+
 	if ( Cmd_Argc() > 1 ) {
 		CL_AddReliableCommand( string );
 	} else {
