@@ -570,6 +570,11 @@ void Con_DrawNotify (void);
 void Con_ClearNotify (void);
 void Con_RunConsole (void);
 void Con_DrawConsole (void);
+// Shared with Field_VariableSizeDraw so the edit line matches the scrollback
+// above it. See the comments on the definitions in cl_console.cpp.
+qboolean Con_UseFontSystem( void );
+int Con_FontHandle( void );
+float Con_FontScale( void );
 void Con_PageUp( int lines );
 void Con_PageDown( int lines );
 void Con_Top( void );

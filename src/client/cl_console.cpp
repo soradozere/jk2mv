@@ -558,6 +558,64 @@ DRAWING
 
 /*
 ================
+Con_UseFontSystem
+
+Which of the console's two text renderers to use.
+
+JK2 carries both: the bitmap charset (`gfx/2d/charsgrid_med`, via
+SCR_DrawSmallChar) and the glyph font system (`Font_DrawString`). The font
+system is here only because Asian glyphs will not fit a 16x16 grid -- but it
+is also the one that survives the browser build.
+
+The charset path is the one that does not. Its texture loads (verified: real
+handle, no load failure, and the glyph cells sit exactly where the UV maths
+expects them), and it draws through the same RE_StretchPic the font system
+uses, yet every glyph comes out as vertical bars -- while font-rendered text
+in the same frame is perfect. That is still unexplained. Rather than leave the
+console unreadable until it is, draw it with the renderer that works.
+
+Emscripten only, so native builds keep their original look exactly.
+================
+*/
+qboolean Con_UseFontSystem( void ) {
+#ifdef __EMSCRIPTEN__
+	return qtrue;
+#else
+	return re.Language_IsAsian();
+#endif
+}
+
+/*
+================
+Con_FontHandle
+Con_FontScale
+
+The font the console draws itself with, and the scale that makes it sit on the
+same grid the bitmap charset would have used. Exposed because the edit line is
+rendered over in cl_keys.cpp (Field_VariableSizeDraw) and has to match the
+lines above it -- a prompt in one size over scrollback in another reads as a
+bug even when both are legible.
+
+The scale is measured rather than assumed: ask the font how wide ten characters
+come out at 1.0, then pick the scale that makes them ten console columns. ocr_a
+is monospaced, which is what lets the cursor keep using column arithmetic.
+================
+*/
+int Con_FontHandle( void ) {
+	static int iFontIndex = re.RegisterFont("ocr_a");
+	return iFontIndex;
+}
+
+float Con_FontScale( void ) {
+	float wide = re.Font_StrLenPixels("aaaaaaaaaa", Con_FontHandle(), 1.0f, cls.xadjust, cls.yadjust);
+	if ( wide <= 0.0f ) {
+		return 1.0f;
+	}
+	return con.charWidth * 10.0f / wide;
+}
+
+/*
+================
 Con_DrawInput
 
 Draw the editline after a ] prompt
@@ -570,13 +628,19 @@ void Con_DrawInput (void) {
 		return;
 	}
 
-	y = con.vislines - ( con.charHeight * (re.Language_IsAsian() ? 1.5 : 2) );
+	y = con.vislines - ( con.charHeight * (Con_UseFontSystem() ? 1.5 : 2) );
 
 	re.SetColor( con.color );
 
 	Field_Draw( &kg.g_consoleField, 2 * con.charWidth, y, qtrue );
 
-	SCR_DrawSmallChar( con.charWidth, y, CONSOLE_PROMPT_CHAR );
+	if ( Con_UseFontSystem() ) {
+		char prompt[] = { CONSOLE_PROMPT_CHAR, '\0' };
+		re.Font_DrawString( con.charWidth, y, prompt, con.color, Con_FontHandle(), -1,
+			Con_FontScale(), cls.xadjust, cls.yadjust );
+	} else {
+		SCR_DrawSmallChar( con.charWidth, y, CONSOLE_PROMPT_CHAR );
+	}
 
 	re.SetColor( g_color_table[ColorIndex_Extended(COLOR_LT_TRANSPARENT)] );
 
@@ -614,7 +678,7 @@ void Con_DrawNotify (void)
 	static int iFontIndex = re.RegisterFont("ocr_a");
 	float fFontScale = 1.0f;
 	int iPixelHeightToAdvance = 0;
-	if (re.Language_IsAsian())
+	if (Con_UseFontSystem())
 	{
 		fFontScale = con.charWidth * 10.0f /
 			re.Font_StrLenPixels("aaaaaaaaaa", iFontIndex, 1.0f, cls.xadjust, cls.yadjust);
@@ -650,7 +714,7 @@ void Con_DrawNotify (void)
 		//
 		// (ignore colours since we're going to print the whole thing as one string)
 		//
-		if (re.Language_IsAsian())
+		if (Con_UseFontSystem())
 		{
 			// concat the text to be printed...
 			//
@@ -800,7 +864,7 @@ void Con_DrawSolidConsole( float frac ) {
 	static int iFontIndex = re.RegisterFont("ocr_a");
 	float fFontScale = 1.0f;
 	int iPixelHeightToAdvance = con.charHeight;
-	if (re.Language_IsAsian())
+	if (Con_UseFontSystem())
 	{
 		fFontScale = con.charWidth * 10.0f /
 			re.Font_StrLenPixels("aaaaaaaaaa", iFontIndex, 1.0f, cls.xadjust, cls.yadjust);
@@ -824,7 +888,7 @@ void Con_DrawSolidConsole( float frac ) {
 		//
 		// (ignore colours since we're going to print the whole thing as one string)
 		//
-		if (re.Language_IsAsian())
+		if (Con_UseFontSystem())
 		{
 			// concat the text to be printed...
 			//
@@ -875,15 +939,31 @@ void Con_DrawConsole( void ) {
 	Con_CheckResize ();
 
 #ifdef __EMSCRIPTEN__
-	// The console is never drawn in the viewer. Worth spelling out why, because
-	// it is genuinely counter-intuitive: when the client is disconnected and
-	// nothing else holds the keys, Q3 renders the console *full screen* as a
-	// backdrop -- and JK2's console background is the Jedi Outcast title art.
-	// That, not any menu, is what kept reappearing whenever a demo failed to
-	// open, which is why blocking UI_SET_ACTIVE_MENU, UI_REFRESH, cinematics and
-	// even clearing the colour buffer every frame all failed to shift it. The
-	// console key is already swallowed in CL_KeyEvent; this stops it drawing too.
-	return;
+	// Two different things were being blocked here by one blanket `return`, and
+	// only one of them is actually a hazard.
+	//
+	// The hazard: when the client is disconnected and nothing else holds the
+	// keys, Q3 renders the console *full screen* as a backdrop -- and JK2's
+	// console background is the Jedi Outcast title art. That, not any menu, is
+	// what kept reappearing whenever a demo failed to open, which is why
+	// blocking UI_SET_ACTIVE_MENU, UI_REFRESH, cinematics and even clearing the
+	// colour buffer every frame all failed to shift it. It stays blocked below,
+	// for live spectators too: a viewer whose connection drops should get their
+	// page back, not Kyle Katarn.
+	//
+	// Not a hazard: the ordinary slide-down console over a running game. A live
+	// spectator wants exactly that -- it is the only scrollback of what was said
+	// and what happened while they were looking elsewhere. Demo playback still
+	// gets nothing, matching the key guard in CL_KeyEvent, which was already
+	// scoped to `clc.demoplaying` rather than to Emscripten. The two guards now
+	// agree; while they disagreed, `toggleconsole` opened a console that could
+	// never paint, which reads from the outside as a dead key.
+	if ( clc.demoplaying ) {
+		return;
+	}
+	if ( cls.state == CA_DISCONNECTED ) {
+		return;
+	}
 #endif
 
 	// if disconnected, render console full screen

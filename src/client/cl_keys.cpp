@@ -426,7 +426,16 @@ void Field_VariableSizeDraw( field_t *edit, int x, int y, qboolean smallSize, qb
 		float	color[4];
 
 		color[0] = color[1] = color[2] = color[3] = 1.0;
-		SCR_DrawSmallStringExt( x, y, str, color, qfalse );
+		// Match whatever the console drew its scrollback with: a prompt in the
+		// bitmap charset under font-rendered history looks like a fault even
+		// when both are readable, and in the browser build the charset is not
+		// readable at all.
+		if ( Con_UseFontSystem() ) {
+			re.Font_DrawString( x, y, str, color, Con_FontHandle(), -1,
+				Con_FontScale(), cls.xadjust, cls.yadjust );
+		} else {
+			SCR_DrawSmallStringExt( x, y, str, color, qfalse );
+		}
 	} else {
 		// draw big string with drop shadow
 		SCR_DrawBigString( x, y, str, 1.0 );
@@ -450,7 +459,22 @@ void Field_VariableSizeDraw( field_t *edit, int x, int y, qboolean smallSize, qb
 	cursorOffset = cursorOffset - scrollOffset;
 
 	if ( smallSize ) {
-		SCR_DrawSmallChar( x + cursorOffset * con.charWidth, y, cursorChar );
+		if ( Con_UseFontSystem() ) {
+			// Chars 10 and 11 are the charset's own block/underline cursor
+			// cells; a real font has no glyph there, so substitute printable
+			// ones that carry the same meaning -- underscore for overstrike,
+			// a bar for insert.
+			float	cursorColor[4];
+			char	cursorStr[2];
+
+			cursorColor[0] = cursorColor[1] = cursorColor[2] = cursorColor[3] = 1.0;
+			cursorStr[0] = kg.key_overstrikeMode ? '_' : '|';
+			cursorStr[1] = '\0';
+			re.Font_DrawString( x + cursorOffset * con.charWidth, y, cursorStr, cursorColor,
+				Con_FontHandle(), -1, Con_FontScale(), cls.xadjust, cls.yadjust );
+		} else {
+			SCR_DrawSmallChar( x + cursorOffset * con.charWidth, y, cursorChar );
+		}
 	} else {
 		char cursorStr[] = { (char)cursorChar, '\0' };
 		SCR_DrawBigString( x + cursorOffset * BIGCHAR_WIDTH, y, cursorStr, 1.0 );
