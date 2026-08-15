@@ -1699,6 +1699,19 @@ void CL_SetCGameTime( void ) {
 		} else if (tn>900) {
 			tn = 900;
 		}
+#elif defined(JKD_LIVE_CONNECT)
+		// A spectator can afford far more buffer than a player. This branch is
+		// only reached on a live connection (demo playback takes the branch
+		// above), and the browser build's live path is the one place where
+		// snapshots cross TCP and arrive in clumps -- so the page sets a nudge
+		// of 60ms and this ceiling leaves room to tune higher from the console
+		// without another engine build. Negative stays clamped hard: rendering
+		// ahead of the newest snapshot is extrapolation by choice.
+		if (tn<-30) {
+			tn = -30;
+		} else if (tn>200) {
+			tn = 200;
+		}
 #else
 		if (tn<-30) {
 			tn = -30;

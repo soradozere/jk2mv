@@ -441,12 +441,27 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetEstimatedDuration( void ) {
 // which is PVS-culled, so this is the measurement that decides how far a free
 // camera or POV switching can go: if it tracks the connected mask, we have the
 // whole match; if it drops as players separate, we only ever have the
+// A live stream and a demo are the same thing to the read-only exports below:
+// both fill cl.snap and cl.gameState, and "what is the engine looking at" has
+// the same answer either way. These were written for the demo viewer and
+// guarded on clc.demoplaying alone, which made every one of them answer
+// "nothing" on a live connection -- the page's Following pill polled a working
+// engine and was told nobody was there.
+static qboolean JKD_HasStream( void ) {
+#ifdef JKD_LIVE_CONNECT
+	extern int jkd_liveSpectate;
+	return (qboolean)( clc.demoplaying || jkd_liveSpectate );
+#else
+	return clc.demoplaying;
+#endif
+}
+
 // recorder's view. Doubles as the data source for a POV picker, which can only
 // offer players the snapshot actually contains.
 EMSCRIPTEN_KEEPALIVE int JKD_GetSnapClientMask( void ) {
 	int i, mask = 0;
 
-	if ( !clc.demoplaying || !cl.snap.valid ) {
+	if ( !JKD_HasStream() || !cl.snap.valid ) {
 		return 0;
 	}
 	for ( i = 0; i < cl.snap.numEntities; i++ ) {
@@ -459,7 +474,7 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetSnapClientMask( void ) {
 }
 
 EMSCRIPTEN_KEEPALIVE int JKD_GetSnapEntityCount( void ) {
-	if ( !clc.demoplaying || !cl.snap.valid ) {
+	if ( !JKD_HasStream() || !cl.snap.valid ) {
 		return -1;
 	}
 	return cl.snap.numEntities;
@@ -469,7 +484,7 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetSnapEntityCount( void ) {
 // playerState rather than the entity list, so it is deliberately absent from
 // JKD_GetSnapClientMask and has to be added back when counting coverage.
 EMSCRIPTEN_KEEPALIVE int JKD_GetViewClientNum( void ) {
-	if ( !clc.demoplaying || !cl.snap.valid ) {
+	if ( !JKD_HasStream() || !cl.snap.valid ) {
 		return -1;
 	}
 	return cl.snap.ps.clientNum;
@@ -480,7 +495,7 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetViewClientNum( void ) {
 EMSCRIPTEN_KEEPALIVE int JKD_GetConnectedMask( void ) {
 	int i, mask = 0;
 
-	if ( !clc.demoplaying ) {
+	if ( !JKD_HasStream() ) {
 		return 0;
 	}
 	for ( i = 0; i < MAX_CLIENTS; i++ ) {
@@ -831,7 +846,7 @@ EMSCRIPTEN_KEEPALIVE int JKD_TrimRevision( void ) {
 // the game itself decides whether to say "Following" -- without it the page
 // labels a player's own demo as though they were spectating themselves.
 EMSCRIPTEN_KEEPALIVE int JKD_IsFollowing( void ) {
-	if ( !clc.demoplaying || !cl.snap.valid ) {
+	if ( !JKD_HasStream() || !cl.snap.valid ) {
 		return 0;
 	}
 	return ( cl.snap.ps.pm_flags & PMF_FOLLOW ) ? 1 : 0;
@@ -876,7 +891,7 @@ should not cost another export and another rebuild.
 EMSCRIPTEN_KEEPALIVE const char *JKD_GetConfigString( int index ) {
 	const char *cs;
 
-	if ( !clc.demoplaying || index < 0 || index >= MAX_CONFIGSTRINGS ) {
+	if ( !JKD_HasStream() || index < 0 || index >= MAX_CONFIGSTRINGS ) {
 		return "";
 	}
 	cs = cl.gameState.stringOffsets[ index ]
@@ -888,7 +903,7 @@ EMSCRIPTEN_KEEPALIVE const char *JKD_GetConfigString( int index ) {
 EMSCRIPTEN_KEEPALIVE const char *JKD_GetPlayerInfo( int clientNum ) {
 	const char *cs;
 
-	if ( !clc.demoplaying || clientNum < 0 || clientNum >= MAX_CLIENTS ) {
+	if ( !JKD_HasStream() || clientNum < 0 || clientNum >= MAX_CLIENTS ) {
 		return "";
 	}
 	cs = cl.gameState.stringOffsets[ CS_PLAYERS + clientNum ]
@@ -1009,6 +1024,13 @@ EMSCRIPTEN_KEEPALIVE int JKD_ConnectSpectate( int serverIndex ) {
 		return 0;
 	}
 	jkd_liveSpectate = 1;
+	// Label this client as a website spectator in its userinfo, so the server
+	// (and anything reading configstrings, once NWH propagates the key) can
+	// tell it apart from a game client. ROM so nothing in-page can repurpose
+	// it; honest labelling rather than authentication, since any native client
+	// could craft the same key -- the point is display, not proof. The key and
+	// value are agreed with TomArrow, whose NWH side does the propagating.
+	Cvar_Get( "soracle", "spectator", CVAR_USERINFO | CVAR_ROM );
 	Com_Printf( "[JKD_LIVE_CONNECT] connecting to %s (%s)\n",
 		jkd_servers[ serverIndex ].name, jkd_servers[ serverIndex ].endpoint );
 	Cbuf_AddText( va( "connect %s\n", jkd_servers[ serverIndex ].endpoint ) );
