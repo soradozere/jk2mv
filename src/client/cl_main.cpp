@@ -989,7 +989,7 @@ typedef struct {
 // hostname here is what the TLS certificate is issued for, so it has to be the
 // name rather than the IP.
 static const jkd_server_t jkd_servers[] = {
-	{ "Soracle Test", "34.150.239.4:443", "wss://34-150-239-4.sslip.io/" },
+	{ "Soracle Test", "34.182.186.217:443", "wss://34-182-186-217.sslip.io/" },
 };
 #define JKD_NUM_SERVERS ( (int)( sizeof( jkd_servers ) / sizeof( jkd_servers[0] ) ) )
 
