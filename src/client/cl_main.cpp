@@ -480,6 +480,40 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetSnapEntityCount( void ) {
 	return cl.snap.numEntities;
 }
 
+// The two halves of the client's time base, for diagnosing stutter that
+// survives a healthy network.
+//
+// Measured on a live match: the game server sends every 10.00ms (p99 11.89,
+// captured on the bridge's own wire), a viewer receives at the full rate with
+// a worst gap of 37ms -- and yet 29% of that viewer's frames render with no
+// new snapshot to show. Those two facts cannot both be about delivery. Live
+// runs `cl_timeNudge 60`, so the client deliberately renders 60ms behind the
+// newest snapshot precisely so a 37ms gap is absorbed and never seen. A third
+// of frames starving on gaps half the size of the buffer means the buffer is
+// not doing its job, and that is a clock problem rather than a network one.
+//
+// `serverTime` is what the client is *rendering*; `snap.serverTime` is what it
+// has *received*. The gap between them is the buffer actually in hand, and it
+// is the number worth watching: it should sit near cl_timeNudge and stay
+// there. Sagging toward zero means the client has caught up with its own data
+// and is extrapolating, which is exactly what stutter looks like. Exported raw
+// rather than pre-subtracted so the page can also watch serverTime's *advance*
+// -- Q3 nudges it by a millisecond or two per snapshot batch to track drift,
+// and that correction is a known sawtooth at snaps 100.
+EMSCRIPTEN_KEEPALIVE int JKD_GetServerTime( void ) {
+	if ( !JKD_HasStream() || !cl.snap.valid ) {
+		return -1;
+	}
+	return cl.serverTime;
+}
+
+EMSCRIPTEN_KEEPALIVE int JKD_GetSnapServerTime( void ) {
+	if ( !JKD_HasStream() || !cl.snap.valid ) {
+		return -1;
+	}
+	return cl.snap.serverTime;
+}
+
 // The client we're currently viewing through. Its entity is carried in the
 // playerState rather than the entity list, so it is deliberately absent from
 // JKD_GetSnapClientMask and has to be added back when counting coverage.
