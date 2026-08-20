@@ -1639,7 +1639,6 @@ void CL_SetCGameTime( void ) {
 
 	if ( clc.demoplaying && cl_freezeDemo->integer ) {
 		// cl_freezeDemo is used to lock a demo in place for single frame advances
-#ifdef __EMSCRIPTEN__
 		/*
 		Keep the time base anchored while frozen. cls.realtime marches on every
 		frame regardless, and the moment the freeze lifts, serverTime is
@@ -1650,9 +1649,18 @@ void CL_SetCGameTime( void ) {
 		landed on. It matters here in a way it never did for this cvar's
 		original single-frame-advance debugging use: the viewer's pause button
 		holds demos frozen for minutes at a time.
+
+		This was `#ifdef __EMSCRIPTEN__`, because the browser viewer's pause
+		button was the only caller that had ever leaned on it. That left a
+		freeze on a NATIVE build actively harmful, and the offline renderer
+		found it. The renderer freezes across every capture-chunk seam so that
+		no demo time passes while the AVI is closed and reopened -- but without
+		the rebase, the unfreeze fast-forwarded by exactly the length of that
+		seam, putting a visible skip in the finished video once per chunk
+		boundary. Nothing about anchoring a frozen demo was ever
+		browser-specific; it is correct on every build.
 		*/
 		cl.serverTimeDelta = cl.serverTime - cls.realtime;
-#endif
 	} else {
 		// cl_timeNudge is a user adjustable cvar that allows more
 		// or less latency to be added in the interest of better
