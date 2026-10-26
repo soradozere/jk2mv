@@ -68,6 +68,18 @@ static char		cl_demoFileName[MAX_OSPATH] = { 0 };
 // against the elapsed clock is what makes an early rate estimate too slow.
 static int		cl_demoFirstRecordIndex = -1;
 
+// Server time of the demo's last snapshot, read straight off the end of the file
+// while its records are counted (CL_CountDemoRecords), or 0 if that failed. With
+// cl_demoFirstTime this is the exact length up front, which the page used to
+// have to estimate -- an estimate that ran 11% short on a 38-minute recording.
+static int		cl_demoLastSnapTime = 0;
+
+// Set only when playback ran out of file. Every other way of stopping (an error,
+// a failed restart) also lands in the disconnected state that reports "stopped"
+// to the page, and the time reached then is not the demo's length. Reporting it
+// as one is how a 38-minute demo came to be saved as 1:47.
+static qboolean	cl_demoReachedEnd = qfalse;
+
 /*
 Count the records in the demo without decoding any of them.
 
@@ -79,11 +91,55 @@ seconds for a seven-hour recording, which is far too long to spend before the
 first frame.
 
 Opens its own handle so playback's file position is untouched.
+
+Also reads the last snapshot's server time on the way out (cl_demoLastSnapTime):
+the walk already knows where the final records sit, and one of them is enough
+for the exact length.
 */
+
+/*
+The server time of the snapshot in one record, or 0 if it carries none.
+
+Only as much parsing as that takes: in every message the server commands come
+before the snapshot and are plain strings, and the server time is the
+snapshot's first field, so none of the delta state a real parse needs is
+involved.
+*/
+static int CL_RecordSnapshotTime( byte *data, int len ) {
+	msg_t	msg;
+	int		op;
+
+	MSG_Init( &msg, data, len );
+	msg.cursize = len;
+	MSG_Bitstream( &msg );
+	MSG_ReadLong( &msg );		// reliable acknowledge
+	while ( msg.readcount <= msg.cursize ) {
+		op = MSG_ReadByte( &msg );
+		if ( op == svc_nop ) {
+			continue;
+		}
+		if ( op == svc_serverCommand ) {
+			MSG_ReadLong( &msg );
+			MSG_ReadString( &msg );
+			continue;
+		}
+		if ( op == svc_snapshot ) {
+			return MSG_ReadLong( &msg );
+		}
+		break;
+	}
+	return 0;
+}
+
+#define DEMO_TAIL_RECORDS	8
+
 static int CL_CountDemoRecords( void ) {
 	fileHandle_t	f = 0;
 	char			name[MAX_OSPATH];
 	int				seq, len, count = 0;
+	int				tailPos[DEMO_TAIL_RECORDS], tailLen[DEMO_TAIL_RECORDS];
+	int				i, k, t;
+	static byte		tailData[MAX_MSGLEN];
 
 	if ( !cl_demoFileName[0] ) {
 		return -1;
@@ -113,10 +169,26 @@ static int CL_CountDemoRecords( void ) {
 		if ( len < 0 || len > MAX_MSGLEN ) {
 			break;			// -1 marks the end; anything else here is corruption
 		}
+		tailPos[count % DEMO_TAIL_RECORDS] = FS_FTell( f );
+		tailLen[count % DEMO_TAIL_RECORDS] = len;
 		if ( FS_Seek( f, len, FS_SEEK_CUR ) < 0 ) {
 			break;
 		}
 		count++;
+	}
+
+	// newest first; the very last record may be a bare command with no snapshot
+	cl_demoLastSnapTime = 0;
+	for ( i = 0; i < DEMO_TAIL_RECORDS && i < count; i++ ) {
+		k = ( count - 1 - i ) % DEMO_TAIL_RECORDS;
+		if ( FS_Seek( f, tailPos[k], FS_SEEK_SET ) < 0 || FS_Read( tailData, tailLen[k], f ) != tailLen[k] ) {
+			break;
+		}
+		t = CL_RecordSnapshotTime( tailData, tailLen[k] );
+		if ( t > 0 ) {
+			cl_demoLastSnapTime = t;
+			break;
+		}
 	}
 
 	FS_FCloseFile( f );
@@ -393,6 +465,19 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetFurthestTime( void ) {
 	return cl_demoFinalTime - cl_demoFirstTime;
 }
 
+// Exact total length in milliseconds, from the first snapshot played to the last
+// one in the file, or 0 until both are known (the first needs playback to have
+// started). Lets the page tell a measured length from the extrapolation below.
+EMSCRIPTEN_KEEPALIVE int JKD_GetExactDuration( void ) {
+	if ( cl_demoTotalRecords < 0 ) {
+		cl_demoTotalRecords = CL_CountDemoRecords();
+	}
+	if ( !cl_demoFirstTime || cl_demoLastSnapTime <= cl_demoFirstTime ) {
+		return 0;
+	}
+	return cl_demoLastSnapTime - cl_demoFirstTime;
+}
+
 // Estimated total length in milliseconds, from the ratio of records consumed to
 // records in the file. A scrubber needs a range from the first frame, and this
 // gives one for the cost of a header walk instead of a full parse. The estimate
@@ -406,6 +491,9 @@ EMSCRIPTEN_KEEPALIVE int JKD_GetEstimatedDuration( void ) {
 	}
 	if ( cl_demoTotalRecords <= 0 ) {
 		return 0;
+	}
+	if ( JKD_GetExactDuration() > 0 ) {
+		return JKD_GetExactDuration();
 	}
 	elapsed = cl_demoFinalTime - cl_demoFirstTime;
 	if ( cl_demoRecordsRead >= cl_demoTotalRecords && elapsed > 0 ) {
@@ -1572,6 +1660,7 @@ void CL_DemoCompleted( void ) {
 		}
 	}
 
+	cl_demoReachedEnd = qtrue;
 	CL_NextDemo();
 	CL_Disconnect_f();
 	// disconnect here does long jump, don't put anything after
@@ -1852,6 +1941,7 @@ void CL_PlayDemo_f( void ) {
 	// mark a backward seek was launched from is deliberately kept.
 	cl_demoRecordsRead = 0;
 	cl_demoFirstRecordIndex = -1;
+	cl_demoReachedEnd = qfalse;
 	// A *different* demo is the one case where keeping them is wrong: they are
 	// absolute server times from the old recording, so elapsed would be measured
 	// against a file that is no longer open. The page can swap demos without
@@ -1869,6 +1959,7 @@ void CL_PlayDemo_f( void ) {
 		works, is counting the same records again.
 		*/
 		cl_demoTotalRecords = -1;
+		cl_demoLastSnapTime = 0;
 	}
 	// taken from arg, not clc.demoName, which has already been truncated by now
 	Q_strncpyz( cl_demoFileName, arg, sizeof( cl_demoFileName ) );
@@ -3784,10 +3875,12 @@ void CL_Frame ( int msec ) {
 				EM_ASM( { if (window.JKD_seekDone) { window.JKD_seekDone(); } } );
 			}
 			// Hand back the length we now know for certain, so a scrubber that
-			// was working from a guess can correct itself.
+			// was working from a guess can correct itself -- but only if the file
+			// really ran out. Stopping for any other reason reports 0: the time
+			// reached then is just where it stopped.
 			EM_ASM( {
 				if (window.JKD_playbackStopped) { window.JKD_playbackStopped($0); }
-			}, cl_demoFirstTime ? cl_demoFinalTime - cl_demoFirstTime : 0 );
+			}, ( cl_demoFirstTime && cl_demoReachedEnd ) ? cl_demoFinalTime - cl_demoFirstTime : 0 );
 		}
 #else
 		VM_Call( uivm, UI_SET_ACTIVE_MENU, UIMENU_MAIN );
