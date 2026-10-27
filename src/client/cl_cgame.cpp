@@ -357,6 +357,7 @@ void CL_ConfigstringModified( void ) {
 	}
 	// get everything after "cs <num>"
 	s = Cmd_ArgsFrom(2);
+	CL_CleanModelConfigstring( index, s );
 
 	old = cl.gameState.stringData + cl.gameState.stringOffsets[ index ];
 	if ( !strcmp( old, s ) ) {

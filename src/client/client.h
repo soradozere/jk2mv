@@ -542,6 +542,7 @@ extern int cl_connectedToPureServer;
 
 void CL_SystemInfoChanged( void );
 void CL_ParseServerMessage( msg_t *msg );
+void CL_CleanModelConfigstring( int index, char *s );
 void CL_SP_Print(const word ID, intptr_t Data);
 
 void CL_EndHTTPDownload(dlHandle_t handle, qboolean success, const char *err_msg);

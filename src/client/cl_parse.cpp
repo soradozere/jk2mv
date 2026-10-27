@@ -483,6 +483,35 @@ void CL_SystemInfoChanged( void ) {
 
 /*
 ==================
+CL_CleanModelConfigstring
+
+Model names are file paths, and a path with stray characters round it opens
+nothing. NWH servers send at least one that way: the trip mine arrives as
+`models/weapons2/laser_trap/laser_trap_w.glm"` plus a newline, so every mine
+in a raw recording from one has no model and is never drawn, and a shield
+converter as `/models/...`. Trimmed in place, before the string is stored, so
+everything downstream -- cgame registration, Ghoul2 instances, renders --
+sees the path the file actually has.
+==================
+*/
+void CL_CleanModelConfigstring( int index, char *s ) {
+	int len;
+
+	if ( index < CS_MODELS || index >= CS_MODELS + MAX_MODELS || !s ) {
+		return;
+	}
+	len = (int)strlen( s );
+	while ( len > 0 && ( s[len - 1] == '"' || s[len - 1] == ' ' || s[len - 1] == '\t' ||
+		s[len - 1] == '\n' || s[len - 1] == '\r' ) ) {
+		s[--len] = '\0';
+	}
+	while ( s[0] == '/' || s[0] == '\\' || s[0] == '"' ) {
+		memmove( s, s + 1, len-- );
+	}
+}
+
+/*
+==================
 CL_ParseGamestate
 ==================
 */
@@ -529,6 +558,7 @@ void CL_ParseGamestate( msg_t *msg ) {
 				Com_Error( ERR_DROP, "configstring > MAX_CONFIGSTRINGS" );
 			}
 			s = MSG_ReadBigString( msg );
+			CL_CleanModelConfigstring( i, s );
 			len = (int)strlen(s);
 
 			if ( len + 1 + cl.gameState.dataCount > MAX_GAMESTATE_CHARS ) {
